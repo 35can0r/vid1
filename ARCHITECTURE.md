@@ -2,64 +2,74 @@
 
 This document describes the two core systems of the Palmier Pro video editor: the Timeline Data Structure and the Model Context Protocol (MCP) server implementation. This analysis is intended to guide a cross-platform Rust/C++ rewrite.
 
-## 1. Timeline Data Structure
+## 1. Project Package & Where Everything Lives
+
+A project is saved as a macOS File Package (a directory that appears as a single file) with the `.palmier` extension. Inside:
+
+- `project.json`: Serialized Timeline (tracks, clips, keyframes). This encodes the entire edit state.
+- `media.json`: MediaManifest (asset metadata, source paths). Maps opaque `mediaRef` IDs found in `project.json` to actual file paths on disk.
+- `generation-log.json`: History of AI generation requests.
+- `thumbnail.jpg`: Preview image shown in the HomeView.
+- `media/`: Directory of assets imported into the project.
+- `chats/`: One JSON file per Agent chat session.
+
+**Rewrite Note:** `project.json` and `media.json` are read and written together, linked via UUIDs.
+
+## 2. Timeline Data Structure
 
 The timeline is a hierarchical, JSON-serializable structure that represents the video project. It is strictly frame-based.
 
 ### Core Hierarchy
 - **`Timeline`**: The root object containing project settings (`fps`, `width`, `height`) and an array of `Track` objects.
-- **`Track`**: A lane on the timeline holding an array of `Clip` objects. Tracks are typed (`ClipType`) to enforce placement constraints (e.g., video clips on video tracks, audio on audio tracks).
+  - **Rewrite Note:** Use a struct with `Vec<Track>`. Timing relies on `fps` (`seconds = frame / fps`).
+- **`Track`**: A lane on the timeline holding an array of `Clip` objects. Tracks are typed (`ClipType`: `video` or `audio`) to enforce placement constraints.
+  - **Rewrite Note:** Gaps are implicit (unoccupied frame ranges). Enforce non-overlapping invariants in the mutation layer.
 - **`Clip`**: The fundamental unit of media on the timeline. It references a `MediaAsset` (via `mediaRef`) and defines its placement, trimming, and presentation properties.
+  - **Rewrite Note:** Use a struct with an enum payload (`enum ClipContent { Video { transform, crop }, Audio { volume }, Text { content, style, layout } }`). Timing fields live on the outer struct.
 
 ### Key `Clip` Properties
-*   **Identification**: `id`, `mediaRef` (links to the underlying `MediaAsset`).
-*   **Typing**: `mediaType`, `sourceClipType` (e.g., `video`, `audio`, `image`, `text`, `lottie`).
+*   **Identification**: `id`, `mediaRef` (links to the `MediaManifest`).
 *   **Placement (Timeline)**: `startFrame`, `durationFrames`. All timing on the timeline is in absolute frames.
-*   **Trimming (Source)**: `trimStartFrame`, `trimEndFrame`. These are source-media offsets, defining which portion of the underlying media is visible.
+*   **Trimming (Source)**: `trimStartFrame`, `trimEndFrame`. Source-media offsets defining the visible portion.
 *   **Playback**: `speed`, `volume`.
-*   **Presentation**: `opacity`, `transform` (custom struct for center, size, rotation, flips), `crop` (custom struct for edge insets).
-*   **Fades**: `fadeInFrames`, `fadeOutFrames`, `fadeInInterpolation`, `fadeOutInterpolation`.
-*   **Grouping**: `linkGroupId`, `captionGroupId`.
-*   **Text/Captions**: `textContent`, `textStyle` (for text overlays).
+*   **Presentation**: `opacity`, `transform` (normalized 0.0-1.0 coords for center, size, rotation, flips), `crop` (normalized 0.0-1.0 edge insets).
+*   **Linking**: `linkGroupId`, `captionGroupId`.
 
 ### Animation and Keyframes
-Clips support animation via generic `KeyframeTrack` objects for several properties:
-*   `opacityTrack`, `volumeTrack`, `rotationTrack` (`KeyframeTrack<Double>`)
-*   `positionTrack`, `scaleTrack` (`KeyframeTrack<AnimPair>`)
-*   `cropTrack` (`KeyframeTrack<Crop>`)
+Clips support animation via generic `KeyframeTrack` objects.
+A `KeyframeTrack<T>` is a sorted list of `Keyframe<V>` structs, where each keyframe specifies a `frame` (clip-relative), a `value`, and an `interpolationOut` (linear, hold, smooth).
 
-A `KeyframeTrack` contains a sorted list of `Keyframe<V>` structs, where each keyframe specifies a `frame` (clip-relative), a `value`, and an `interpolationOut` (linear, hold, smooth). The clip "samples" these tracks at specific frames to determine its state (e.g., `opacityAt(frame: Int)`).
+**Rewrite Note:** Implement a generic `KeyframeTrack<T: Lerp>` with a `BTreeMap<i64, Keyframe<T>>`.
 
-### Frame Coordinate System
-*   Timeline time is measured in absolute project frames (`fps` is defined at the `Timeline` level).
-*   `startFrame` is the absolute position on the timeline.
-*   Keyframe times are *clip-relative* (`keyframeOffset = absoluteFrame - startFrame`).
-*   Media playback utilizes source frames, derived from absolute frames via `trimStartFrame` and `speed`.
+### JSON Serialization & Compaction
+When writing to disk or sending to the LLM (via `get_timeline`), the JSON is compacted to reduce size/token count:
+- UUIDs are lowercase hyphenated strings.
+- Omit all fields that equal their default value (e.g., opacity: 1.0, speed: 1.0).
+- Keyframe tracks are omitted if empty.
+- For LLM context, individual caption clips are replaced with a `CaptionGroup` summary per track.
 
-## 2. MCP (Model Context Protocol) Server Implementation
+## 3. MCP (Model Context Protocol) Server Implementation
 
-Palmier Pro acts as an MCP server, allowing an AI agent (e.g., Claude) to directly interact with the editor by reading state and executing editing actions.
+Palmier Pro acts as an MCP server, allowing an AI agent to directly interact with the editor.
 
 ### Architecture
-*   **`MCPHTTPServer`**: A custom, minimal HTTP server built on Apple's `Network` framework (`NWListener`). It binds locally to `127.0.0.1:19789` and processes standard HTTP requests into MCP payloads via `StatelessHTTPServerTransport`.
-*   **`MCPService`**: The orchestrator. It instantiates the `MCPHTTPServer` and an MCP `Server` object (from the `MCP` library). It registers the required MCP tools and resources.
-*   **`ToolExecutor`**: The bridge between the MCP interface and the application's internal state (`EditorViewModel`). It receives a tool name and arguments, validates them, and mutates the `EditorViewModel` directly on the `MainActor`.
-
-### Registration and Tools
-`MCPService` registers available tools defined in `ToolDefinitions`. These definitions include the tool name, description, and an JSON Schema for its arguments. The agent calls these tools to inspect or mutate the project.
-
-Key tools include:
-*   **Read State**: `get_timeline`, `get_media`, `inspect_media`, `get_transcript`. The agent uses these to understand the current project state (read-only).
-*   **Mutation (Editing)**: `add_clips`, `remove_clips`, `remove_tracks`, `move_clips`, `set_clip_properties`, `set_keyframes`, `split_clip`, `ripple_delete_ranges`. These map directly to human editing gestures.
-*   **Generation**: `generate_video`, `generate_image`, `generate_audio`, `upscale_media`. These trigger async background jobs.
+*   **`MCPHTTPServer`**: A minimal HTTP server binding locally to `127.0.0.1:19789`. It processes HTTP requests into MCP payloads.
+  - **Rewrite Note:** Use `axum` or `actix-web` with a JSON-RPC 2.0 handler at `POST /mcp`. Bind to loopback only.
+*   **`MCPService`**: Registers tools (`ToolDefinitions`) and tears down the server when a project closes.
+*   **`ToolExecutor`**: The single entry point for tool execution. Validates arguments and dispatches to the correct implementation. Wraps operations in `withUndoGroup`.
+*   **Claude Desktop Bridging (`mcpb`)**: Claude Desktop only supports `stdio` transport. The app bundles a Node.js shim (`mcpb/server/index.js` using `mcp-remote`) that translates `stdio` to HTTP and forwards requests to `127.0.0.1:19789/mcp`.
 
 ### Execution Flow (Agent -> Editor)
-1.  **AI Decides**: The AI agent, based on its context and instructions (`AgentInstructions.serverInstructions`), decides to perform an action (e.g., "split clip A at frame 100").
-2.  **Tool Call**: The agent sends an MCP `CallTool` request over HTTP.
-3.  **HTTP to Server**: `MCPHTTPServer` receives the request, parses it, and hands it to the internal `Server` object.
-4.  **Dispatch**: `MCPService` handles the `CallTool` method. It bridges the arguments (`ToolArgsBridge.argsFromMCP`) and calls `ToolExecutor.execute(name:args:)`.
-5.  **Validation & Mutation**: `ToolExecutor` routes to the specific implementation (e.g., `ToolExecutor+Clips.swift -> splitClip`). It validates the arguments, finds the target clip in the `EditorViewModel`, performs the mutation (often wrapping it in `withUndoGroup`), and returns a string describing the result.
-6.  **Response**: The result is wrapped into an MCP `CallTool.Result` and sent back over HTTP to the agent.
+1.  **Tool Call**: The agent sends an MCP `CallTool` request over HTTP.
+2.  **Validation Layer**:
+    - **Unknown key check**: Compares JSON keys to schema properties.
+    - **Type decode**: Maps raw dict to internal structs.
+    - **Finiteness check**: Rejects `NaN`/`Infinity` in float fields.
+    - **Rewrite Note**: Replicate this strict 3-step validation. Return structured error strings for LLM self-correction.
+3.  **Mutation**: Dispatches to specific handlers (e.g., `add_clips`, `split_clip`). Mutations occur on the main thread via `EditorViewModel`.
+    - **Rewrite Note**: The Swift app uses `NSUndoManager`. Implement a Command Stack in Rust where each entry is an enum of reversible operations (e.g., `InsertClip`, `MoveClip`).
+    - **Rewrite Note:** For threading, use `Arc<Mutex<Timeline>>` or the actor pattern via `tokio`. The HTTP handler should send commands through a channel to the "engine thread".
+4.  **Response**: Returns `ToolResult` back over HTTP.
 
-### The EditorViewModel Connection
-The `ToolExecutor` holds a reference to the `EditorViewModel`. All timeline mutations triggered by the agent are executed as methods on the `EditorViewModel` on the main thread (e.g., `editor.splitClip(clipId:atFrame:)`). This ensures that AI-driven edits use the exact same code paths as user-driven UI edits, maintaining consistency and populating the undo stack correctly.
+### In-App Agent (`AgentService`)
+The in-app chat panel uses `AgentService` instead of `MCPService`. It manages conversation history, handles `@mention` syntax, and supports Anthropic API keys or the Palmier backend. It converges on the exact same `ToolExecutor.execute()` pipeline as external MCP clients.
