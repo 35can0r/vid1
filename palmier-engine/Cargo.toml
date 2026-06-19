@@ -1,0 +1,17 @@
+[package]
+name = "palmier-engine"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bytemuck = "1.25.0"
+env_logger = "0.11.10"
+log = "0.4.32"
+pollster = "0.4.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+uuid = { version = "1.23.3", features = ["v4", "serde"] }
+wgpu = "29.0.3"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
