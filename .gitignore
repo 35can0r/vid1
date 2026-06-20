@@ -1,3 +1,10 @@
 /palmier-engine/target
 palmier-engine/Cargo.lock
 /render/pipeline/build
+/engine/target/
+/render/effects/build/
+/ui/bin/
+/ui/obj/
+dotnet-install.ps1
+install.log
+test.log
