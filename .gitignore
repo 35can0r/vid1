@@ -1,2 +1,3 @@
 /palmier-engine/target
 palmier-engine/Cargo.lock
+/render/pipeline/build
