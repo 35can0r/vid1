@@ -1,5 +1,7 @@
 #include "directml_context.h"
 #include "color_grade_effect.h"
+#include "texture_pool.h"
+#include "effects_pipeline.h"
 #include <iostream>
 #include <vector>
 #include <chrono>
@@ -92,26 +94,78 @@ int main() {
         std::cout << "[Benchmark] GPU (DirectML) Average Time: " << gpuTimeMs << " ms" << std::endl;
         std::cout << "[Benchmark] GPU Speedup: " << (cpuTimeMs / gpuTimeMs) << "x" << std::endl;
 
-        // 7. Verify correctness
-        float maxDiff = 0.0f;
-        float diffSum = 0.0f;
-        for (size_t i = 0; i < gpuOutputFrame.size(); ++i) {
-            float diff = std::abs(cpuOutputFrame[i] - gpuOutputFrame[i]);
-            maxDiff = std::max(maxDiff, diff);
-            diffSum += diff;
+        // 7. Benchmark GPU Persistent VRAM Texture Path
+        std::cout << "[Benchmark] Running GPU Persistent VRAM Texture path..." << std::endl;
+        
+        TexturePool pool(context.GetD3D12Device(), width, height, 8);
+        int inputIdx = pool.acquire();
+        int outputIdx = pool.acquire();
+        if (inputIdx < 0 || outputIdx < 0) {
+            throw std::runtime_error("Failed to acquire textures from the pool");
         }
-        float avgDiff = diffSum / gpuOutputFrame.size();
+        ID3D12Resource* inputTex = pool.get_resource(inputIdx);
+        ID3D12Resource* outputTex = pool.get_resource(outputIdx);
 
-        std::cout << "[Benchmark] Verification Results:" << std::endl;
-        std::cout << "  Max absolute difference: " << maxDiff << std::endl;
-        std::cout << "  Average absolute difference: " << avgDiff << std::endl;
+        // Upload input frame to pool texture
+        EffectsPipeline::upload_frame(context, inputFrame.data(), inputTex, pool.GetSizeInBytes());
+
+        // Warm-up (triggers graph compilation and initial GPU execution)
+        EffectsPipeline::apply_effects(context, effect, inputTex, outputTex, params);
+        context.FlushGPU();
+
+        auto vramStart = std::chrono::high_resolution_clock::now();
+        for (int i = 0; i < iterations; ++i) {
+            EffectsPipeline::apply_effects(context, effect, inputTex, outputTex, params);
+        }
+        
+        // Wait for all queued GPU commands to finish so we can measure execution time accurately
+        context.FlushGPU();
+        auto vramEnd = std::chrono::high_resolution_clock::now();
+        double vramTimeMs = std::chrono::duration<double, std::milli>(vramEnd - vramStart).count() / iterations;
+
+        std::cout << "[Benchmark] GPU Persistent VRAM Texture Average Time: " << vramTimeMs << " ms" << std::endl;
+        std::cout << "[Benchmark] Speedup vs Original GPU Path: " << (gpuTimeMs / vramTimeMs) << "x" << std::endl;
+
+        // Download the final output frame for correctness verification (export simulation)
+        std::vector<float> vramOutputFrame(pixelCount * 4, 0.0f);
+        EffectsPipeline::readback_frame(context, outputTex, vramOutputFrame.data(), pool.GetSizeInBytes());
+
+        // Release pool resources
+        pool.release(inputIdx);
+        pool.release(outputIdx);
+
+        // 8. Verify correctness
+        float maxDiffOriginal = 0.0f;
+        float diffSumOriginal = 0.0f;
+        float maxDiffVram = 0.0f;
+        float diffSumVram = 0.0f;
+
+        for (size_t i = 0; i < cpuOutputFrame.size(); ++i) {
+            float diffOrig = std::abs(cpuOutputFrame[i] - gpuOutputFrame[i]);
+            maxDiffOriginal = std::max(maxDiffOriginal, diffOrig);
+            diffSumOriginal += diffOrig;
+
+            float diffVram = std::abs(cpuOutputFrame[i] - vramOutputFrame[i]);
+            maxDiffVram = std::max(maxDiffVram, diffVram);
+            diffSumVram += diffVram;
+        }
+        float avgDiffOriginal = diffSumOriginal / gpuOutputFrame.size();
+        float avgDiffVram = diffSumVram / vramOutputFrame.size();
+
+        std::cout << "[Benchmark] Verification Results (Original GPU):" << std::endl;
+        std::cout << "  Max absolute difference: " << maxDiffOriginal << std::endl;
+        std::cout << "  Average absolute difference: " << avgDiffOriginal << std::endl;
+
+        std::cout << "[Benchmark] Verification Results (Optimized VRAM GPU):" << std::endl;
+        std::cout << "  Max absolute difference: " << maxDiffVram << std::endl;
+        std::cout << "  Average absolute difference: " << avgDiffVram << std::endl;
 
         const float tolerance = 1e-4f;
-        if (maxDiff < tolerance) {
-            std::cout << "[SUCCESS] GPU and CPU outputs match within tolerance (" << tolerance << ")." << std::endl;
+        if (maxDiffOriginal < tolerance && maxDiffVram < tolerance) {
+            std::cout << "[SUCCESS] Both GPU paths match CPU NEON reference within tolerance (" << tolerance << ")." << std::endl;
             return 0;
         } else {
-            std::cout << "[ERROR] GPU and CPU outputs exceed tolerance!" << std::endl;
+            std::cout << "[ERROR] Outputs exceed tolerance!" << std::endl;
             return 1;
         }
 

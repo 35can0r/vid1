@@ -30,6 +30,13 @@ public:
         const ColorGradeParameters& params
     );
 
+    // Optimized GPU Processing path using DirectML with persistent VRAM textures
+    void ProcessFrameGPUTexture(
+        ID3D12Resource* inputBuffer,
+        ID3D12Resource* outputBuffer,
+        const ColorGradeParameters& params
+    );
+
     // CPU Fallback path using ARM64 NEON intrinsics
     void ProcessFrameCPU(
         const float* inputRGBA,

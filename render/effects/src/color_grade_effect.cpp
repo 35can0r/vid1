@@ -556,6 +556,137 @@ void ColorGradeEffect::ProcessFrameGPU(
     m_outputReadbackBuffer->Unmap(0, nullptr);
 }
 
+void ColorGradeEffect::ProcessFrameGPUTexture(
+    ID3D12Resource* inputBuffer,
+    ID3D12Resource* outputBuffer,
+    const ColorGradeParameters& params
+) {
+    // 1. Ensure initialization
+    CompileOperatorGraph(params);
+    AllocateGPUResources();
+    UpdateConstantTensors(params);
+
+    // 2. Open command list and record commands
+    HRESULT hr = m_commandAllocator->Reset();
+    THROW_IF_FAILED(hr, "Failed to reset Command Allocator");
+
+    hr = m_commandList->Reset(m_commandAllocator.Get(), nullptr);
+    THROW_IF_FAILED(hr, "Failed to reset Command List");
+
+    // Copy constant upload buffers to GPU default buffers
+    m_commandList->CopyBufferRegion(m_scaleGPUBuffer.Get(), 0, m_scaleUploadBuffer.Get(), 0, 16);
+    m_commandList->CopyBufferRegion(m_biasGPUBuffer.Get(), 0, m_biasUploadBuffer.Get(), 0, 16);
+
+    // Transition constant buffers and input/output resources to proper states
+    D3D12_RESOURCE_BARRIER barriers[4] = {};
+    
+    // Scale GPU Buffer transition
+    barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barriers[0].Transition.pResource = m_scaleGPUBuffer.Get();
+    barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+
+    // Bias GPU Buffer transition
+    barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barriers[1].Transition.pResource = m_biasGPUBuffer.Get();
+    barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+
+    // Input Pool Buffer transition (COMMON -> UNORDERED_ACCESS)
+    barriers[2].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barriers[2].Transition.pResource = inputBuffer;
+    barriers[2].Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+    barriers[2].Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    barriers[2].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+
+    // Output Pool Buffer transition (COMMON -> UNORDERED_ACCESS)
+    barriers[3].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barriers[3].Transition.pResource = outputBuffer;
+    barriers[3].Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+    barriers[3].Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    barriers[3].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+
+    m_commandList->ResourceBarrier(4, barriers);
+
+    // Dynamic binding for the passed input and output buffers
+    DML_BUFFER_BINDING inputBindings[3] = {};
+    inputBindings[0] = { inputBuffer, 0, m_tensorSizeInBytes };
+    inputBindings[1] = { m_scaleGPUBuffer.Get(), 0, 16 };
+    inputBindings[2] = { m_biasGPUBuffer.Get(), 0, 16 };
+
+    DML_BINDING_DESC inputBindingDescs[3] = {};
+    inputBindingDescs[0] = { DML_BINDING_TYPE_BUFFER, &inputBindings[0] };
+    inputBindingDescs[1] = { DML_BINDING_TYPE_BUFFER, &inputBindings[1] };
+    inputBindingDescs[2] = { DML_BINDING_TYPE_BUFFER, &inputBindings[2] };
+    m_bindingTable->BindInputs(3, inputBindingDescs);
+
+    DML_BUFFER_BINDING outputBinding = { outputBuffer, 0, m_tensorSizeInBytes };
+    DML_BINDING_DESC outputBindingDesc = { DML_BINDING_TYPE_BUFFER, &outputBinding };
+    m_bindingTable->BindOutputs(1, &outputBindingDesc);
+
+    // Bind temporary buffer (if required)
+    DML_BINDING_PROPERTIES bindingProps = m_compiledOperator->GetBindingProperties();
+    if (m_temporaryBuffer) {
+        DML_BUFFER_BINDING tempBinding = { m_temporaryBuffer.Get(), 0, bindingProps.TemporaryResourceSize };
+        DML_BINDING_DESC bindingDesc = { DML_BINDING_TYPE_BUFFER, &tempBinding };
+        m_bindingTable->BindTemporaryResource(&bindingDesc);
+    }
+
+    // Set descriptor heap
+    if (m_descriptorHeap) {
+        ID3D12DescriptorHeap* heaps[] = { m_descriptorHeap.Get() };
+        m_commandList->SetDescriptorHeaps(1, heaps);
+    }
+
+    // Record DirectML execution dispatch
+    ComPtr<IDMLCommandRecorder> recorder;
+    hr = m_context.GetDMLDevice()->CreateCommandRecorder(IID_PPV_ARGS(&recorder));
+    THROW_IF_FAILED(hr, "Failed to create DirectML Command Recorder");
+
+    recorder->RecordDispatch(
+        m_commandList.Get(),
+        m_compiledOperator.Get(),
+        m_bindingTable.Get()
+    );
+
+    // Transition constant buffers and input/output resources back
+    D3D12_RESOURCE_BARRIER restoreBarriers[4] = {};
+    
+    restoreBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    restoreBarriers[0].Transition.pResource = m_scaleGPUBuffer.Get();
+    restoreBarriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    restoreBarriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+    restoreBarriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+
+    restoreBarriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    restoreBarriers[1].Transition.pResource = m_biasGPUBuffer.Get();
+    restoreBarriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    restoreBarriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+    restoreBarriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+
+    restoreBarriers[2].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    restoreBarriers[2].Transition.pResource = inputBuffer;
+    restoreBarriers[2].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    restoreBarriers[2].Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
+    restoreBarriers[2].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+
+    restoreBarriers[3].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    restoreBarriers[3].Transition.pResource = outputBuffer;
+    restoreBarriers[3].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    restoreBarriers[3].Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
+    restoreBarriers[3].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+
+    m_commandList->ResourceBarrier(4, restoreBarriers);
+
+    hr = m_commandList->Close();
+    THROW_IF_FAILED(hr, "Failed to close Command List");
+
+    // Execute the recorded list. NO Flushes or host stalls!
+    m_context.ExecuteCommandList(m_commandList.Get());
+}
+
 void ColorGradeEffect::ProcessFrameCPU(
     const float* inputRGBA,
     float* outputRGBA,

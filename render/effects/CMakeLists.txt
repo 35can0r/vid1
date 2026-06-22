@@ -42,6 +42,8 @@ add_executable(effects_benchmark
     src/main.cpp
     src/directml_context.cpp
     src/color_grade_effect.cpp
+    src/texture_pool.cpp
+    src/effects_pipeline.cpp
 )
 
 target_include_directories(effects_benchmark PRIVATE 
