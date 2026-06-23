@@ -1,4 +1,5 @@
 #include "compositor.h"
+#include "../../effects/src/texture_pool.h"
 #include <iostream>
 #include <fstream>
 #include <vector>
@@ -245,58 +246,64 @@ void Compositor::create_vertex_buffer() {
     vb_view_.SizeInBytes = sizeof(vertices);
 }
 
-TextureHandle* Compositor::composite(const LayerDesc* layers, uint32_t count, TextureHandle* output_texture) {
+CompositeResult Compositor::composite_async(const LayerDesc* layers, uint32_t count, TextureHandle* output_texture) {
     if (count > 32) count = 32;
+
+    TexturePool* pool = TexturePool::Get();
+    if (!pool) {
+        throw std::runtime_error("Compositor: TexturePool instance is null");
+    }
 
     cmd_alloc_->Reset();
     cmd_list_->Reset(cmd_alloc_.Get(), pso_.Get());
 
     // 1. Transition output_texture to RENDER_TARGET
-    D3D12_RESOURCE_BARRIER barrier = {};
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition.pResource = output_texture;
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    cmd_list_->ResourceBarrier(1, &barrier);
+    D3D12_RESOURCE_BARRIER out_barrier = {};
+    out_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    out_barrier.Transition.pResource = output_texture;
+    out_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    out_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+    out_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    cmd_list_->ResourceBarrier(1, &out_barrier);
 
-    // Get RTV handle
-    D3D12_CPU_DESCRIPTOR_HANDLE rtv_handle = rtv_heap_->GetCPUDescriptorHandleForHeapStart();
+    // 2. Transition input layers to PIXEL_SHADER_RESOURCE
+    for (uint32_t i = 0; i < count; i++) {
+        D3D12_RESOURCE_BARRIER in_barrier = {};
+        in_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        in_barrier.Transition.pResource = layers[i].texture;
+        in_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        in_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+        in_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        cmd_list_->ResourceBarrier(1, &in_barrier);
+    }
 
-    // Create RTV
-    D3D12_RENDER_TARGET_VIEW_DESC rtv_desc = {};
-    rtv_desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-    rtv_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
-    device_->CreateRenderTargetView(output_texture, &rtv_desc, rtv_handle);
+    // Get RTV handle directly from pool
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv_handle = pool->get_rtv_cpu(output_texture);
 
-    // 2. Clear render target
+    // Clear render target
     float clear_color[] = { 0.0f, 0.0f, 0.0f, 1.0f };
     cmd_list_->ClearRenderTargetView(rtv_handle, clear_color, 0, nullptr);
 
     cmd_list_->OMSetRenderTargets(1, &rtv_handle, FALSE, nullptr);
 
-    // 3. Set viewport (MUST be after OMSetRenderTargets)
+    // Set viewport
     D3D12_VIEWPORT viewport = { 0.0f, 0.0f, (float)canvas_w_, (float)canvas_h_, 0.0f, 1.0f };
     cmd_list_->RSSetViewports(1, &viewport);
 
-    // 4. Set scissor
+    // Set scissor
     D3D12_RECT scissor = { 0, 0, (LONG)canvas_w_, (LONG)canvas_h_ };
     cmd_list_->RSSetScissorRects(1, &scissor);
 
-    // Set root signature and heaps
-    ID3D12DescriptorHeap* heaps[] = { srv_heap_.Get() };
+    // Set root signature and heaps (use the pool's srv heap)
+    ID3D12DescriptorHeap* heaps[] = { pool->get_srv_heap() };
     cmd_list_->SetDescriptorHeaps(1, heaps);
     cmd_list_->SetGraphicsRootSignature(root_sig_.Get());
     cmd_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmd_list_->IASetVertexBuffers(0, 1, &vb_view_);
 
-    UINT srv_descriptor_size = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-
-    // 5. For each layer
+    // For each layer
     for (uint32_t i = 0; i < count; i++) {
         const LayerDesc& layer = layers[i];
-
-        // Ensure texture is in SRV state (assume it already is, based on comments)
 
         // Update CBV
         LayerCBData* cb = &cb_mapped_[i];
@@ -316,22 +323,8 @@ TextureHandle* Compositor::composite(const LayerDesc* layers, uint32_t count, Te
         cb->tint = layer.grade.tint;
         cb->saturation = layer.grade.saturation;
 
-        // Create SRV in the heap
-        D3D12_CPU_DESCRIPTOR_HANDLE cpu_handle = srv_heap_->GetCPUDescriptorHandleForHeapStart();
-        cpu_handle.ptr += i * srv_descriptor_size;
-
-        D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
-        srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srv_desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-        srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        srv_desc.Texture2D.MipLevels = 1;
-
-        device_->CreateShaderResourceView(layer.texture, &srv_desc, cpu_handle);
-
-        D3D12_GPU_DESCRIPTOR_HANDLE gpu_handle = srv_heap_->GetGPUDescriptorHandleForHeapStart();
-        gpu_handle.ptr += i * srv_descriptor_size;
-
-        cmd_list_->SetGraphicsRootDescriptorTable(0, gpu_handle);
+        // Bind the GPU SRV handle from pool directly
+        cmd_list_->SetGraphicsRootDescriptorTable(0, pool->get_srv_gpu(layer.texture));
 
         D3D12_GPU_VIRTUAL_ADDRESS cb_gpu_addr = cb_upload_->GetGPUVirtualAddress() + i * sizeof(LayerCBData);
         cmd_list_->SetGraphicsRootConstantBufferView(1, cb_gpu_addr);
@@ -340,19 +333,35 @@ TextureHandle* Compositor::composite(const LayerDesc* layers, uint32_t count, Te
         cmd_list_->DrawInstanced(6, 1, 0, 0);
     }
 
-    // 6. Transition output_texture back to PIXEL_SHADER_RESOURCE
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-    cmd_list_->ResourceBarrier(1, &barrier);
+    // 3. Transition output_texture back to COMMON
+    out_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    out_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
+    cmd_list_->ResourceBarrier(1, &out_barrier);
 
-    // 7. Close, execute, wait
+    // 4. Transition input layers back to COMMON
+    for (uint32_t i = 0; i < count; i++) {
+        D3D12_RESOURCE_BARRIER in_barrier = {};
+        in_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        in_barrier.Transition.pResource = layers[i].texture;
+        in_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        in_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        in_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
+        cmd_list_->ResourceBarrier(1, &in_barrier);
+    }
+
+    // Close, execute, signal fence
     cmd_list_->Close();
     ID3D12CommandList* ppCommandLists[] = { cmd_list_.Get() };
     queue_->ExecuteCommandLists(1, ppCommandLists);
 
-    wait_gpu();
+    fence_val_++;
+    queue_->Signal(fence_.Get(), fence_val_);
 
-    return output_texture;
+    CompositeResult res = {};
+    res.output = output_texture;
+    res.fence_value = fence_val_;
+    res.fence = fence_.Get();
+    return res;
 }
 
 // C ABI Implementation
@@ -361,12 +370,31 @@ extern "C" {
         return new Compositor(device, queue, canvas_width, canvas_height);
     }
 
-    TextureHandle* compositor_composite(CompositorHandle handle, const LayerDesc* layers, uint32_t layer_count, TextureHandle* output_texture) {
+    CompositeResult compositor_composite_async(CompositorHandle handle, const LayerDesc* layers, uint32_t layer_count, TextureHandle* output_texture) {
         Compositor* comp = static_cast<Compositor*>(handle);
-        return comp->composite(layers, layer_count, output_texture);
+        return comp->composite_async(layers, layer_count, output_texture);
+    }
+
+    TextureHandle* compositor_composite(CompositorHandle handle, const LayerDesc* layers, uint32_t layer_count, TextureHandle* output_texture) {
+        CompositeResult r = compositor_composite_async(handle, layers, layer_count, output_texture);
+        if (r.fence->GetCompletedValue() < r.fence_value) {
+            HANDLE event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+            if (event) {
+                r.fence->SetEventOnCompletion(r.fence_value, event);
+                WaitForSingleObject(event, INFINITE);
+                CloseHandle(event);
+            }
+        }
+        return r.output;
+    }
+
+    uint64_t compositor_current_fence_val(CompositorHandle handle) {
+        Compositor* comp = static_cast<Compositor*>(handle);
+        return comp->current_fence_val();
     }
 
     void compositor_destroy(CompositorHandle handle) {
         delete static_cast<Compositor*>(handle);
     }
 }
+

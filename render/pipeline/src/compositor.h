@@ -3,6 +3,7 @@
 #include <d3d12.h>
 #include <wrl/client.h>
 #include <stdint.h>
+#include <vector>
 #include "../include/compositor.h"
 
 using Microsoft::WRL::ComPtr;
@@ -29,8 +30,10 @@ public:
                uint32_t canvas_w, uint32_t canvas_h);
     ~Compositor();
 
-    TextureHandle* composite(const LayerDesc* layers, uint32_t count,
-                            TextureHandle* output);
+    CompositeResult composite_async(const LayerDesc* layers, uint32_t count,
+                                    TextureHandle* output);
+
+    uint64_t current_fence_val() const { return fence_val_; }
 
 private:
     // DX12 objects created once in constructor

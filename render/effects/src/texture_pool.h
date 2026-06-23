@@ -25,7 +25,20 @@ public:
     uint32_t GetHeight() const { return m_height; }
     uint64_t GetSizeInBytes() const { return m_sizeInBytes; }
 
+    D3D12_CPU_DESCRIPTOR_HANDLE get_srv_cpu(ID3D12Resource* h) const;
+    D3D12_GPU_DESCRIPTOR_HANDLE get_srv_gpu(ID3D12Resource* h) const;
+    D3D12_CPU_DESCRIPTOR_HANDLE get_rtv_cpu(ID3D12Resource* h) const;
+    D3D12_CPU_DESCRIPTOR_HANDLE get_uav_cpu(ID3D12Resource* h) const;
+    D3D12_GPU_DESCRIPTOR_HANDLE get_uav_gpu(ID3D12Resource* h) const;
+
+    ID3D12DescriptorHeap* get_srv_heap() const { return m_srvHeap.Get(); }
+    ID3D12DescriptorHeap* get_uav_heap() const { return m_uavHeap.Get(); }
+
+    static TexturePool* Get() { return s_instance; }
+
 private:
+    static TexturePool* s_instance;
+
     uint32_t m_width;
     uint32_t m_height;
     uint32_t m_capacity;
@@ -34,4 +47,13 @@ private:
     std::vector<ComPtr<ID3D12Resource>> m_resources;
     std::vector<bool> m_inUse;
     mutable std::mutex m_mutex;
+
+    ComPtr<ID3D12DescriptorHeap> m_srvHeap;
+    ComPtr<ID3D12DescriptorHeap> m_rtvHeap;
+    ComPtr<ID3D12DescriptorHeap> m_uavHeap;
+    UINT m_srvDescriptorSize;
+    UINT m_rtvDescriptorSize;
+    UINT m_uavDescriptorSize;
+
+    int get_resource_index(ID3D12Resource* h) const;
 };

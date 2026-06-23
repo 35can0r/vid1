@@ -48,6 +48,14 @@ typedef struct LayerDesc {
 // C ABI - these signatures must not change
 typedef void* CompositorHandle;
 
+typedef struct ID3D12Fence ID3D12Fence;
+
+typedef struct CompositeResult {
+    TextureHandle* output;       // the output texture (not yet ready)
+    uint64_t       fence_value;  // wait on this before reading output
+    ID3D12Fence*   fence;        // the fence to wait on
+} CompositeResult;
+
 CompositorHandle compositor_create(
     ID3D12Device*       device,
     ID3D12CommandQueue* queue,
@@ -65,8 +73,18 @@ TextureHandle* compositor_composite(
     TextureHandle*      output_texture   // pre-acquired from TexturePool
 );
 
+CompositeResult compositor_composite_async(
+    CompositorHandle    handle,
+    const LayerDesc*    layers,
+    uint32_t            layer_count,
+    TextureHandle*      output_texture
+);
+
+uint64_t compositor_current_fence_val(CompositorHandle handle);
+
 void compositor_destroy(CompositorHandle handle);
 
 #ifdef __cplusplus
 }
 #endif
+
