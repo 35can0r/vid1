@@ -711,22 +711,53 @@ void ColorGradeEffect::ProcessFrameCPU(
     float bias_a = 0.0f;
 
 #if defined(__arm64__) || defined(_M_ARM64)
-    float scale_arr[4] = { scale_r, scale_g, scale_b, scale_a };
-    float32x4_t v_scale = vld1q_f32(scale_arr);
+    float E_val = std::pow(2.0f, params.exposure);
+    float C_val = params.contrast;
+    float temp_offset = params.temperature * 0.1f;
+    float tint_offset = params.tint * 0.1f;
+    float sat = params.saturation;
 
-    float bias_arr[4] = { bias_r, bias_g, bias_b, bias_a };
-    float32x4_t v_bias = vld1q_f32(bias_arr);
+    float32x4_t v_exp     = vdupq_n_f32(E_val);
+    float32x4_t v_contrast = vdupq_n_f32(C_val);
+    float32x4_t v_half    = vdupq_n_f32(0.5f);
+
+    // Temp & tint offsets applied per-channel: [+temp, +tint, -temp, 0]
+    float offset_arr[4] = { temp_offset, tint_offset, -temp_offset, 0.0f };
+    float32x4_t v_offsets = vld1q_f32(offset_arr);
+
+    // REC.709 luma weights [R, G, B, 0]
+    float luma_arr[4] = { 0.2126f, 0.7152f, 0.0722f, 0.0f };
+    float32x4_t v_luma_weights = vld1q_f32(luma_arr);
+
+    float32x4_t v_sat  = vdupq_n_f32(sat);
     float32x4_t v_zero = vdupq_n_f32(0.0f);
-    float32x4_t v_one = vdupq_n_f32(1.0f);
+    float32x4_t v_one  = vdupq_n_f32(1.0f);
 
-    uint32_t totalPixels = m_pixelCount;
-    for (uint32_t i = 0; i < totalPixels; ++i) {
+    for (uint32_t i = 0; i < m_pixelCount; ++i) {
         float32x4_t pixel = vld1q_f32(inputRGBA + i * 4);
-        
-        // pixel = pixel * v_scale + v_bias
-        pixel = vmlaq_f32(v_bias, pixel, v_scale);
 
-        // Clamp to [0.0, 1.0]
+        // Step 1: Exposure — pixel *= 2^exposure
+        pixel = vmulq_f32(pixel, v_exp);
+
+        // Step 2: Contrast — pixel = (pixel - 0.5) * contrast + 0.5
+        pixel = vsubq_f32(pixel, v_half);
+        pixel = vmlaq_f32(v_half, pixel, v_contrast);
+
+        // Step 3: Temperature & Tint — add channel offsets
+        pixel = vaddq_f32(pixel, v_offsets);
+
+        // Step 4: Saturation — lerp(luma, pixel, saturation)
+        float32x4_t v_weighted = vmulq_f32(pixel, v_luma_weights);
+        float luma = vgetq_lane_f32(v_weighted, 0)
+                   + vgetq_lane_f32(v_weighted, 1)
+                   + vgetq_lane_f32(v_weighted, 2);
+        float32x4_t v_luma = vdupq_n_f32(luma);
+        pixel = vmlaq_f32(v_luma, vsubq_f32(pixel, v_luma), v_sat);
+
+        // Restore original alpha (saturation must not touch alpha)
+        pixel = vsetq_lane_f32(inputRGBA[i * 4 + 3], pixel, 3);
+
+        // Step 5: Clamp [0, 1]
         pixel = vmaxq_f32(pixel, v_zero);
         pixel = vminq_f32(pixel, v_one);
 

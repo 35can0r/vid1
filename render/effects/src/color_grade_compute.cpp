@@ -1,6 +1,7 @@
 #include "color_grade_compute.h"
 #include <d3dcompiler.h>
 #include <stdexcept>
+#include <string>
 #include <cmath>
 #include <cstring>
 

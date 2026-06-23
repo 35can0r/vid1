@@ -8,3 +8,5 @@ palmier-engine/Cargo.lock
 dotnet-install.ps1
 install.log
 test.log
+build/
+sample.mp4
