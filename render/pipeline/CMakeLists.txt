@@ -53,3 +53,63 @@ target_include_directories(decoder_test PRIVATE
 target_link_libraries(decoder_test PRIVATE
     decoder
 )
+
+# Create the pipeline static library
+add_library(pipeline STATIC
+    src/compositor.cpp
+)
+
+target_include_directories(pipeline PUBLIC
+    src
+    include
+)
+
+target_link_libraries(pipeline PUBLIC
+    d3d12
+    dxgi
+    d3dcompiler
+)
+
+# HLSL Compilation for Compositor
+add_custom_command(
+    OUTPUT compositor_vs.cso
+    COMMAND dxc -T vs_6_0 -E VSMain -Fo compositor_vs.cso ${CMAKE_CURRENT_SOURCE_DIR}/shaders/compositor.hlsl
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/compositor.hlsl
+    COMMENT "Compiling compositor VS"
+)
+
+add_custom_command(
+    OUTPUT compositor_ps.cso
+    COMMAND dxc -T ps_6_0 -E PSMain -Fo compositor_ps.cso ${CMAKE_CURRENT_SOURCE_DIR}/shaders/compositor.hlsl
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/compositor.hlsl
+    COMMENT "Compiling compositor PS"
+)
+
+# Test executable for the compositor
+add_executable(compositor_test
+    src/compositor_test.cpp
+    ../effects/src/texture_pool.cpp
+    compositor_vs.cso
+    compositor_ps.cso
+)
+
+target_include_directories(compositor_test PRIVATE
+    src
+    include
+    ../effects/src
+)
+
+target_link_libraries(compositor_test PRIVATE
+    pipeline
+    decoder
+)
+
+add_custom_command(TARGET compositor_test POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_BINARY_DIR}/compositor_vs.cso"
+        "$<TARGET_FILE_DIR:compositor_test>/compositor_vs.cso"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_BINARY_DIR}/compositor_ps.cso"
+        "$<TARGET_FILE_DIR:compositor_test>/compositor_ps.cso"
+    COMMENT "Copying compiled shaders to output directory"
+)
