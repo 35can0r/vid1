@@ -14,7 +14,9 @@ fn main() {
 
     // Configure CMake (ARM64 Release)
     let build_dir = root.join("render/build");
-    Command::new("cmake")
+    let vcpkg_root = std::env::var("VCPKG_ROOT").unwrap_or_else(|_| "D:/k50i/vcpkg".to_string());
+    
+    let configure_status = Command::new("cmake")
         .args([
             "-B",
             build_dir.to_str().unwrap(),
@@ -25,14 +27,18 @@ fn main() {
             "-DCMAKE_BUILD_TYPE=Release",
             &format!(
                 "-DCMAKE_TOOLCHAIN_FILE={}/vcpkg/scripts/buildsystems/vcpkg.cmake",
-                std::env::var("VCPKG_ROOT").unwrap_or_default()
+                vcpkg_root
             ),
             "-DVCPKG_TARGET_TRIPLET=arm64-windows",
         ])
         .status()
-        .expect("cmake configure failed");
+        .expect("Failed to start cmake configure");
 
-    Command::new("cmake")
+    if !configure_status.success() {
+        panic!("cmake configure failed with status: {:?}", configure_status);
+    }
+
+    let build_status = Command::new("cmake")
         .args([
             "--build",
             build_dir.to_str().unwrap(),
@@ -40,7 +46,11 @@ fn main() {
             "Release",
         ])
         .status()
-        .expect("cmake build failed");
+        .expect("Failed to start cmake build");
+
+    if !build_status.success() {
+        panic!("cmake build failed with status: {:?}", build_status);
+    }
 
     // Tell cargo where to find the .lib files
     println!(
@@ -58,7 +68,6 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", build_dir.display());
 
     println!("cargo:rustc-link-lib=static=pipeline");
-    println!("cargo:rustc-link-lib=static=effects");
 
     // Windows system libs needed by the C++ code
     for lib in &["d3d12", "dxgi", "d3d11", "d3dcompiler", "dxguid"] {
