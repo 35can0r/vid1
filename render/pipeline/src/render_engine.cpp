@@ -13,6 +13,7 @@ struct RendererHandle {
     CompositorHandle compositor;
     uint32_t width;
     uint32_t height;
+    int last_slot = -1;
 };
 
 extern "C" {
@@ -22,6 +23,7 @@ extern "C" {
         r->height = canvas_height;
         r->pool = nullptr;
         r->compositor = nullptr;
+        r->last_slot = -1;
 
         // 1. Initialize DX12 Device
         if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&r->device)))) {
@@ -65,14 +67,19 @@ extern "C" {
     TextureHandle* render_frame(RendererHandle* r, int64_t frame_number) {
         if (!r || !r->compositor || !r->pool) return nullptr;
 
-        // Note: Full implementation would call decoder_decode_frame to get the active clip's frame.
-        // For now, we simulate an empty/blank composite since we haven't integrated the multi-clip timeline decoding here.
-        // Get an output texture from the pool
-        TextureHandle* output_texture = r->pool->acquire();
+        // Release the previous frame's slot to prevent pool exhaustion
+        if (r->last_slot != -1) {
+            r->pool->release(r->last_slot);
+            r->last_slot = -1;
+        }
 
-        if (!output_texture) {
+        // Get an output texture from the pool
+        int slot = r->pool->acquire();
+        if (slot < 0) {
             return nullptr;
         }
+        r->last_slot = slot;
+        TextureHandle* output_texture = r->pool->get_resource(slot);
 
         // We would normally build a LayerDesc array here.
         // For the mock, we can pass 0 layers to compositor_composite_async which should clear the render target.

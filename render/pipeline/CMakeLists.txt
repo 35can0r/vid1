@@ -57,11 +57,15 @@ target_link_libraries(decoder_test PRIVATE
 # Create the pipeline static library
 add_library(pipeline STATIC
     src/compositor.cpp
+    src/preview_presenter.cpp
+    src/render_engine.cpp
+    ../effects/src/texture_pool.cpp
 )
 
 target_include_directories(pipeline PUBLIC
     src
     include
+    ../effects/src
 )
 
 target_link_libraries(pipeline PUBLIC

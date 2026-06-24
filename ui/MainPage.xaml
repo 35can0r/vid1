@@ -65,7 +65,8 @@
                 
                 <!-- Monitor viewport -->
                 <Grid Grid.Row="0" Background="#0C0C0E" Margin="15,15,15,10" CornerRadius="6" BorderThickness="1" BorderBrush="#28282C">
-                    <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="10">
+                    <SwapChainPanel x:Name="PreviewCanvas" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" />
+                    <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="10" IsHitTestVisible="False">
                         <FontIcon Glyph="&#xE714;" FontSize="48" Foreground="#4E4E54" />
                         <TextBlock Text="Palmier Player Monitor" FontSize="15" FontWeight="SemiBold" Foreground="#4E4E54" />
                         <TextBlock x:Name="PlayheadTimecode" Text="00:00:00.00" FontSize="13" Foreground="#8E8E9F" HorizontalAlignment="Center" />
