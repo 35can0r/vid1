@@ -102,8 +102,8 @@ void PreviewPresenter::create_swapchain(IUnknown* panel_native, uint32_t w, uint
     desc.SampleDesc = {1, 0};
     desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     desc.BufferCount = 2;
-    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
-    desc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
 
     ComPtr<IDXGISwapChain1> sc1;
     hr = factory->CreateSwapChainForComposition(queue_, &desc, nullptr, &sc1);
@@ -245,7 +245,16 @@ void PreviewPresenter::present(ID3D12Resource* compositor_output) {
     cmd_alloc_->Reset();
     cmd_list_->Reset(cmd_alloc_.Get(), tonemap_pso_.Get());
 
-    // 1. Create SRV for compositor output (which is RGBA32F) in slot 0 of tonemap_srv_heap_
+    // 1. Transition compositor_output to PIXEL_SHADER_RESOURCE state
+    D3D12_RESOURCE_BARRIER src_barrier = {};
+    src_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    src_barrier.Transition.pResource = compositor_output;
+    src_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    src_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+    src_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    cmd_list_->ResourceBarrier(1, &src_barrier);
+
+    // 2. Create SRV for compositor output (which is RGBA32F) in slot 0 of tonemap_srv_heap_
     D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
     srvDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
     srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
@@ -255,7 +264,7 @@ void PreviewPresenter::present(ID3D12Resource* compositor_output) {
     D3D12_CPU_DESCRIPTOR_HANDLE srvHandle = tonemap_srv_heap_->GetCPUDescriptorHandleForHeapStart();
     device_->CreateShaderResourceView(compositor_output, &srvDesc, srvHandle);
 
-    // 2. Transition swapchain backbuffer to RENDER_TARGET state
+    // 3. Transition swapchain backbuffer to RENDER_TARGET state
     D3D12_RESOURCE_BARRIER barrier = {};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barrier.Transition.pResource = backbuffer;
@@ -290,7 +299,12 @@ void PreviewPresenter::present(ID3D12Resource* compositor_output) {
     cmd_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmd_list_->DrawInstanced(3, 1, 0, 0);
 
-    // 3. Transition swapchain backbuffer back to PRESENT state
+    // 4. Transition compositor_output back to COMMON state
+    src_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    src_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
+    cmd_list_->ResourceBarrier(1, &src_barrier);
+
+    // 5. Transition swapchain backbuffer back to PRESENT state
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
     barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
     cmd_list_->ResourceBarrier(1, &barrier);
