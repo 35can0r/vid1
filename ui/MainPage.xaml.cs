@@ -22,6 +22,8 @@ namespace ui
         private Timeline _timeline = new();
         private IntPtr _timelinePtr = IntPtr.Zero;
         private DispatcherTimer _playbackTimer = new();
+        private IntPtr _engine = IntPtr.Zero;
+        private IntPtr _presenter = IntPtr.Zero;
 
         public MainPage()
         {
@@ -40,17 +42,37 @@ namespace ui
             InitializeMockTimeline();
             InitializeRustFFI();
 
+            // 1. Boot the C++ DX12 Rendering Engine
+            _engine = NativeMethods.renderer_create(_timeline.width, _timeline.height);
+
+            // 2. Hook the C++ Render Engine to the WinUI 3 SwapChainPanel
+            var panelNative = PreviewCanvas.As<PalmierPro.Engine.ISwapChainPanelNative>();
+            nint panelPtr = Marshal.GetIUnknownForObject(panelNative);
+
+            _presenter = NativeMethods.presenter_create(panelPtr, _engine, _timeline.width, _timeline.height);
+
             // Connect event handlers
             TimelineEditor.ClipPositionChanged += OnClipPositionChanged;
             TimelineEditor.PlayheadPositionChanged += OnPlayheadPositionChanged;
             
             // Set initial playhead timecode
             OnPlayheadPositionChanged(TimelineEditor.PlayheadFrame);
+            RenderCurrentFrame();
         }
 
         private void MainPage_Unloaded(object sender, RoutedEventArgs e)
         {
             FreeRustFFI();
+            if (_presenter != IntPtr.Zero)
+            {
+                NativeMethods.presenter_destroy(_presenter);
+                _presenter = IntPtr.Zero;
+            }
+            if (_engine != IntPtr.Zero)
+            {
+                NativeMethods.renderer_destroy(_engine);
+                _engine = IntPtr.Zero;
+            }
             _playbackTimer.Stop();
         }
 
@@ -228,9 +250,20 @@ namespace ui
             PlayheadTimecode.Text = $"{hours:D2}:{minutes:D2}:{seconds:D2}.{frames:D2}";
         }
 
+        private void RenderCurrentFrame()
+        {
+            if (_presenter != IntPtr.Zero && _engine != IntPtr.Zero)
+            {
+                long frame = TimelineEditor.PlayheadFrame;
+                nint output = NativeMethods.render_frame(_engine, frame);
+                NativeMethods.presenter_present(_presenter, output);
+            }
+        }
+
         private void PlaybackTimer_Tick(object sender, object e)
         {
             TimelineEditor.SetPlayheadFrame(TimelineEditor.PlayheadFrame + 1);
+            RenderCurrentFrame();
         }
 
         private void OnPlayClick(object sender, RoutedEventArgs e)
@@ -252,12 +285,14 @@ namespace ui
         {
             _playbackTimer.Stop();
             TimelineEditor.SetPlayheadFrame(TimelineEditor.PlayheadFrame - 1);
+            RenderCurrentFrame();
         }
 
         private void OnNextFrameClick(object sender, RoutedEventArgs e)
         {
             _playbackTimer.Stop();
             TimelineEditor.SetPlayheadFrame(TimelineEditor.PlayheadFrame + 1);
+            RenderCurrentFrame();
         }
 
         private void OnZoomSliderChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)

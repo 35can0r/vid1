@@ -21,5 +21,31 @@ namespace PalmierPro.Engine
 
         [LibraryImport(LibraryName)]
         public static partial void string_free(IntPtr ptr);
+
+        [LibraryImport(LibraryName)]
+        public static partial nint renderer_create(uint canvas_width, uint canvas_height);
+
+        [LibraryImport(LibraryName)]
+        public static partial void renderer_destroy(nint renderer);
+
+        [LibraryImport(LibraryName)]
+        public static partial nint presenter_create(nint panelNative, nint renderer, uint w, uint h);
+
+        [LibraryImport(LibraryName)]
+        public static partial void presenter_present(nint presenter, nint outputTexture);
+
+        [LibraryImport(LibraryName)]
+        public static partial void presenter_destroy(nint presenter);
+
+        [LibraryImport(LibraryName)]
+        public static partial nint render_frame(nint renderer, long frame_number);
+    }
+
+    [System.Runtime.InteropServices.ComImport]
+    [System.Runtime.InteropServices.Guid("63aad0b8-7c24-40ff-85a8-640d944cc325")]
+    [System.Runtime.InteropServices.InterfaceType(System.Runtime.InteropServices.ComInterfaceType.InterfaceIsIUnknown)]
+    public interface ISwapChainPanelNative
+    {
+        void SetSwapChain(IntPtr swapChain);
     }
 }
