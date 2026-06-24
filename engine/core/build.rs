@@ -1,18 +1,69 @@
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
+
 fn main() {
-    // Search directories for the compiled C++ static libraries
-    println!("cargo:rustc-link-search=native=d:/k50i/do  it/build/pipeline/Release");
-    println!("cargo:rustc-link-search=native=d:/k50i/do  it/build/pipeline/Debug");
-    println!("cargo:rustc-link-search=native=d:/k50i/do  it/build/pipeline");
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let root = PathBuf::from(&manifest)
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
 
-    // Link the C++ pipeline static library
+    // Configure CMake (ARM64 Release)
+    let build_dir = root.join("render/build");
+    Command::new("cmake")
+        .args([
+            "-B",
+            build_dir.to_str().unwrap(),
+            "-S",
+            root.join("render").to_str().unwrap(),
+            "-A",
+            "ARM64",
+            "-DCMAKE_BUILD_TYPE=Release",
+            &format!(
+                "-DCMAKE_TOOLCHAIN_FILE={}/vcpkg/scripts/buildsystems/vcpkg.cmake",
+                std::env::var("VCPKG_ROOT").unwrap_or_default()
+            ),
+            "-DVCPKG_TARGET_TRIPLET=arm64-windows",
+        ])
+        .status()
+        .expect("cmake configure failed");
+
+    Command::new("cmake")
+        .args([
+            "--build",
+            build_dir.to_str().unwrap(),
+            "--config",
+            "Release",
+        ])
+        .status()
+        .expect("cmake build failed");
+
+    // Tell cargo where to find the .lib files
+    println!(
+        "cargo:rustc-link-search=native={}",
+        build_dir.join("pipeline").join("Release").display()
+    );
+    println!(
+        "cargo:rustc-link-search=native={}",
+        build_dir.join("effects").join("Release").display()
+    );
+    println!(
+        "cargo:rustc-link-search=native={}",
+        build_dir.join("Release").display()
+    );
+    println!("cargo:rustc-link-search=native={}", build_dir.display());
+
     println!("cargo:rustc-link-lib=static=pipeline");
+    println!("cargo:rustc-link-lib=static=effects");
 
-    // Link the necessary Windows DirectX 12 system libraries
-    println!("cargo:rustc-link-lib=dylib=d3d12");
-    println!("cargo:rustc-link-lib=dylib=dxgi");
-    println!("cargo:rustc-link-lib=dylib=d3dcompiler");
-    println!("cargo:rustc-link-lib=dylib=user32");
-    println!("cargo:rustc-link-lib=dylib=ole32");
+    // Windows system libs needed by the C++ code
+    for lib in &["d3d12", "dxgi", "d3d11", "d3dcompiler", "dxguid"] {
+        println!("cargo:rustc-link-lib={lib}");
+    }
 
     // Force the MSVC linker to export the C++ API symbols from the static library
     println!("cargo:rustc-cdylib-link-arg=/EXPORT:renderer_create");
@@ -21,4 +72,57 @@ fn main() {
     println!("cargo:rustc-cdylib-link-arg=/EXPORT:presenter_present");
     println!("cargo:rustc-cdylib-link-arg=/EXPORT:presenter_destroy");
     println!("cargo:rustc-cdylib-link-arg=/EXPORT:render_frame");
+
+    // Copy DirectML.dll and FFmpeg DLLs to the target output directory
+    let target_dir = out_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+
+    // Helper function to dynamically search for DLLs in a directory recursively
+    fn copy_dlls(dir: &PathBuf, target: &PathBuf, search_patterns: &[&str]) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    copy_dlls(&path, target, search_patterns);
+                } else if path.extension().and_then(|s| s.to_str()) == Some("dll") {
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                        let lower_name = name.to_lowercase();
+                        for pattern in search_patterns {
+                            if lower_name.contains(pattern) {
+                                fs::copy(&path, target.join(name)).ok();
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Search within the render directory (and build/vcpkg_installed) for DirectML and FFmpeg dlls
+    copy_dlls(
+        &root.join("render"),
+        &target_dir,
+        &["directml", "avcodec", "avformat", "avutil", "swscale"],
+    );
+
+    // Re-run if any C++ source changes
+    println!(
+        "cargo:rerun-if-changed={}",
+        root.join("render/pipeline/src").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        root.join("render/effects/src").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        root.join("render/pipeline/shaders").display()
+    );
 }
