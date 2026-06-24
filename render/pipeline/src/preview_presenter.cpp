@@ -264,13 +264,6 @@ void PreviewPresenter::present(ID3D12Resource* compositor_output) {
     barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
     cmd_list_->ResourceBarrier(1, &barrier);
 
-    // Set viewport and scissor rects
-    D3D12_VIEWPORT viewport = { 0.0f, 0.0f, (float)width_, (float)height_, 0.0f, 1.0f };
-    cmd_list_->RSSetViewports(1, &viewport);
-
-    D3D12_RECT scissorRect = { 0, 0, (LONG)width_, (LONG)height_ };
-    cmd_list_->RSSetScissorRects(1, &scissorRect);
-
     // Set RTV
     UINT rtvDescriptorSize = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = rtv_heap_->GetCPUDescriptorHandleForHeapStart();
@@ -286,6 +279,12 @@ void PreviewPresenter::present(ID3D12Resource* compositor_output) {
     ID3D12DescriptorHeap* heaps[] = { tonemap_srv_heap_.Get() };
     cmd_list_->SetDescriptorHeaps(1, heaps);
     cmd_list_->SetGraphicsRootDescriptorTable(0, tonemap_srv_heap_->GetGPUDescriptorHandleForHeapStart());
+
+    // Set viewport and scissor rects immediately before drawing
+    D3D12_VIEWPORT vp = { 0.0f, 0.0f, (float)width_, (float)height_, 0.0f, 1.0f };
+    D3D12_RECT scissor = { 0, 0, (LONG)width_, (LONG)height_ };
+    cmd_list_->RSSetViewports(1, &vp);
+    cmd_list_->RSSetScissorRects(1, &scissor);
 
     // Draw fullscreen triangle
     cmd_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);

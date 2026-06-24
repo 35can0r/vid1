@@ -3,6 +3,8 @@
 #include <wrl/client.h>
 #include "../../effects/src/texture_pool.h"
 #include "../include/compositor.h"
+#include "video_decoder.h"
+#include <iostream>
 
 using Microsoft::WRL::ComPtr;
 
@@ -11,6 +13,7 @@ struct RendererHandle {
     ComPtr<ID3D12CommandQueue> queue;
     TexturePool* pool;
     CompositorHandle compositor;
+    DecoderHandle* decoder = nullptr;
     uint32_t width;
     uint32_t height;
     int last_slot = -1;
@@ -45,11 +48,25 @@ extern "C" {
         // 4. Initialize the Compositor
         r->compositor = compositor_create(r->device.Get(), r->queue.Get(), canvas_width, canvas_height);
 
+        // 5. Initialize the Video Decoder with fallback paths to handle working directory mismatches
+        r->decoder = decoder_open("sample.mp4");
+        if (!r->decoder) r->decoder = decoder_open("../sample.mp4");
+        if (!r->decoder) r->decoder = decoder_open("../../sample.mp4");
+        if (!r->decoder) r->decoder = decoder_open("../../../sample.mp4");
+        if (!r->decoder) r->decoder = decoder_open("../../../../sample.mp4");
+
+        if (r->decoder) {
+            std::cout << "[RenderEngine] Loaded sample.mp4 successfully for preview." << std::endl;
+        } else {
+            std::cerr << "[RenderEngine] Warning: Failed to locate sample.mp4." << std::endl;
+        }
+
         return r;
     }
 
     void renderer_destroy(RendererHandle* r) {
         if (r) {
+            if (r->decoder) decoder_close(r->decoder);
             if (r->compositor) compositor_destroy(r->compositor);
             if (r->pool) delete r->pool;
             delete r;
@@ -81,9 +98,35 @@ extern "C" {
         r->last_slot = slot;
         TextureHandle* output_texture = r->pool->get_resource(slot);
 
-        // We would normally build a LayerDesc array here.
-        // For the mock, we can pass 0 layers to compositor_composite_async which should clear the render target.
-        CompositeResult result = compositor_composite_async(r->compositor, nullptr, 0, output_texture);
+        // Decode frame if decoder is active
+        TextureHandle* layer_texture = nullptr;
+        int layer_slot = -1;
+        if (r->decoder) {
+            layer_slot = r->pool->acquire();
+            if (layer_slot >= 0) {
+                layer_texture = r->pool->get_resource(layer_slot);
+                decoder_seek(r->decoder, frame_number);
+                decoder_decode_frame(r->decoder, layer_texture);
+            }
+        }
+
+        CompositeResult result = {};
+        if (layer_texture) {
+            LayerDesc layer = {};
+            layer.texture = layer_texture;
+            layer.opacity = 1.0f;
+            layer.transform.center_x = 0.5f;
+            layer.transform.center_y = 0.5f;
+            layer.transform.width = 1.0f;
+            layer.transform.height = 1.0f;
+            layer.transform.rotation = 0.0f;
+            layer.crop = { 0.0f, 0.0f, 0.0f, 0.0f };
+            layer.grade = { 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, {0,0,0} };
+
+            result = compositor_composite_async(r->compositor, &layer, 1, output_texture);
+        } else {
+            result = compositor_composite_async(r->compositor, nullptr, 0, output_texture);
+        }
 
         // Wait on fence
         if (result.fence && result.fence->GetCompletedValue() < result.fence_value) {
@@ -93,6 +136,11 @@ extern "C" {
                 WaitForSingleObject(event, INFINITE);
                 CloseHandle(event);
             }
+        }
+
+        // Release the temporary slot back to the pool immediately after rendering
+        if (layer_slot >= 0) {
+            r->pool->release(layer_slot);
         }
 
         return result.output;

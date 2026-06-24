@@ -67,10 +67,22 @@ fn main() {
     );
     println!("cargo:rustc-link-search=native={}", build_dir.display());
 
+    // Search path for vcpkg static libraries (FFmpeg)
+    let vcpkg_lib_dir = format!("{}/installed/arm64-windows-static-md/lib", vcpkg_root);
+    println!("cargo:rustc-link-search=native={}", vcpkg_lib_dir);
+
+    // Link C++ static libraries
     println!("cargo:rustc-link-lib=static=pipeline");
+    println!("cargo:rustc-link-lib=static=decoder");
+
+    // Link FFmpeg static libraries
+    println!("cargo:rustc-link-lib=static=avcodec");
+    println!("cargo:rustc-link-lib=static=avformat");
+    println!("cargo:rustc-link-lib=static=avutil");
+    println!("cargo:rustc-link-lib=static=swscale");
 
     // Windows system libs needed by the C++ code
-    for lib in &["d3d12", "dxgi", "d3d11", "d3dcompiler", "dxguid"] {
+    for lib in &["d3d12", "dxgi", "d3d11", "d3dcompiler", "dxguid", "bcrypt", "ws2_32", "secur32", "ncrypt", "crypt32", "mfplat", "mfuuid", "strmiids", "ole32", "oleaut32"] {
         println!("cargo:rustc-link-lib={lib}");
     }
 
