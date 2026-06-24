@@ -1,4 +1,5 @@
 #include "video_decoder.h"
+#include "../../effects/src/texture_pool.h"
 #include <iostream>
 #include <vector>
 #include <list>
@@ -154,7 +155,7 @@ static bool init_compute_shader(DecoderHandle* h, bool use_array) {
         shader_src = 
             "Texture2DArray<float> InputY : register(t0);\n"
             "Texture2DArray<float2> InputUV : register(t1);\n"
-            "RWBuffer<float> OutputBuffer : register(u0);\n"
+            "RWTexture2D<float4> OutputBuffer : register(u0);\n"
             "\n"
             "cbuffer Params : register(b0)\n"
             "{\n"
@@ -189,17 +190,13 @@ static bool init_compute_shader(DecoderHandle* h, bool use_array) {
             "    b = saturate(b);\n"
             "    float a = 1.0f;\n"
             "\n"
-            "    uint pixelIndex = (dispatchThreadID.y * Width + dispatchThreadID.x) * 4;\n"
-            "    OutputBuffer[pixelIndex + 0] = r;\n"
-            "    OutputBuffer[pixelIndex + 1] = g;\n"
-            "    OutputBuffer[pixelIndex + 2] = b;\n"
-            "    OutputBuffer[pixelIndex + 3] = a;\n"
+            "    OutputBuffer[dispatchThreadID.xy] = float4(r, g, b, a);\n"
             "}\n";
     } else {
         shader_src = 
             "Texture2D<float> InputY : register(t0);\n"
             "Texture2D<float2> InputUV : register(t1);\n"
-            "RWBuffer<float> OutputBuffer : register(u0);\n"
+            "RWTexture2D<float4> OutputBuffer : register(u0);\n"
             "\n"
             "cbuffer Params : register(b0)\n"
             "{\n"
@@ -234,11 +231,7 @@ static bool init_compute_shader(DecoderHandle* h, bool use_array) {
             "    b = saturate(b);\n"
             "    float a = 1.0f;\n"
             "\n"
-            "    uint pixelIndex = (dispatchThreadID.y * Width + dispatchThreadID.x) * 4;\n"
-            "    OutputBuffer[pixelIndex + 0] = r;\n"
-            "    OutputBuffer[pixelIndex + 1] = g;\n"
-            "    OutputBuffer[pixelIndex + 2] = b;\n"
-            "    OutputBuffer[pixelIndex + 3] = a;\n"
+            "    OutputBuffer[dispatchThreadID.xy] = float4(r, g, b, a);\n"
             "}\n";
     }
 
@@ -405,8 +398,7 @@ static bool ensure_initialized(DecoderHandle* h, ID3D12Device* d3d12_device) {
     return true;
 }
 
-// CPU copy upload fallback implementation for software decoding path
-static bool upload_to_d3d12_buffer(DecoderHandle* h, const float* float_data, ID3D12Resource* out_texture, uint64_t size_in_bytes) {
+static bool upload_to_d3d12_texture(DecoderHandle* h, const float* float_data, ID3D12Resource* out_texture, uint64_t size_in_bytes) {
     ID3D12Device* device = h->d3d12_device;
 
     if (!h->upload_buffer || h->upload_buffer_size < size_in_bytes) {
@@ -463,7 +455,21 @@ static bool upload_to_d3d12_buffer(DecoderHandle* h, const float* float_data, ID
     barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     h->copy_cmd_list->ResourceBarrier(1, &barrier);
 
-    h->copy_cmd_list->CopyBufferRegion(out_texture, 0, h->upload_buffer.Get(), 0, size_in_bytes);
+    D3D12_TEXTURE_COPY_LOCATION dst = {};
+    dst.pResource = out_texture;
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dst.SubresourceIndex = 0;
+
+    D3D12_TEXTURE_COPY_LOCATION src = {};
+    src.pResource = h->upload_buffer.Get();
+    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    src.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    src.PlacedFootprint.Footprint.Width = h->width;
+    src.PlacedFootprint.Footprint.Height = h->height;
+    src.PlacedFootprint.Footprint.Depth = 1;
+    src.PlacedFootprint.Footprint.RowPitch = h->width * 4 * sizeof(float);
+
+    h->copy_cmd_list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
 
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
     barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
@@ -518,8 +524,8 @@ static ErrorCode output_frame_to_texture(DecoderHandle* h, AVFrame* frame, ID3D1
             }
         }
 
-        // Wrap D3D12 target buffer for D3D11 Compute Shader UAV access
-        ComPtr<ID3D11Buffer> d3d11_buffer;
+        // Wrap D3D12 target texture for D3D11 Compute Shader UAV access
+        ComPtr<ID3D11Texture2D> d3d11_tex;
         D3D11_RESOURCE_FLAGS rFlags = {};
         rFlags.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
 
@@ -528,7 +534,7 @@ static ErrorCode output_frame_to_texture(DecoderHandle* h, AVFrame* frame, ID3D1
             &rFlags,
             D3D12_RESOURCE_STATE_COMMON,
             D3D12_RESOURCE_STATE_COMMON,
-            IID_PPV_ARGS(&d3d11_buffer)
+            IID_PPV_ARGS(&d3d11_tex)
         );
         if (FAILED(hr)) {
             std::cerr << "[Decoder] D3D11On12 CreateWrappedResource failed: 0x" << std::hex << hr << std::dec << "\n";
@@ -572,12 +578,11 @@ static ErrorCode output_frame_to_texture(DecoderHandle* h, AVFrame* frame, ID3D1
         // Create UAV for writing float data
         ComPtr<ID3D11UnorderedAccessView> uav;
         D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
-        uavDesc.Format = DXGI_FORMAT_R32_FLOAT;
-        uavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-        uavDesc.Buffer.FirstElement = 0;
-        uavDesc.Buffer.NumElements = h->width * h->height * 4;
+        uavDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+        uavDesc.Texture2D.MipSlice = 0;
 
-        hr = h->d3d11_device->CreateUnorderedAccessView(d3d11_buffer.Get(), &uavDesc, &uav);
+        hr = h->d3d11_device->CreateUnorderedAccessView(d3d11_tex.Get(), &uavDesc, &uav);
         if (FAILED(hr)) {
             std::cerr << "[Decoder] Create UAV failed: 0x" << std::hex << hr << std::dec << "\n";
             return DECODER_ERROR_DECODE_FAILED;
@@ -593,7 +598,7 @@ static ErrorCode output_frame_to_texture(DecoderHandle* h, AVFrame* frame, ID3D1
         }
 
         // Dispatch conversion shader
-        ID3D11Resource* resourceToAcquire = d3d11_buffer.Get();
+        ID3D11Resource* resourceToAcquire = d3d11_tex.Get();
         h->d3d11on12_device->AcquireWrappedResources(&resourceToAcquire, 1);
 
         h->d3d11_context->CSSetShader(h->compute_shader.Get(), nullptr, 0);
@@ -666,7 +671,7 @@ static ErrorCode output_frame_to_texture(DecoderHandle* h, AVFrame* frame, ID3D1
 
         // Upload to D3D12 DEFAULT heap buffer
         uint64_t size_in_bytes = h->width * h->height * 4 * sizeof(float);
-        if (!upload_to_d3d12_buffer(h, rgba32f.data(), out_texture, size_in_bytes)) {
+        if (!upload_to_d3d12_texture(h, rgba32f.data(), out_texture, size_in_bytes)) {
             std::cerr << "[Decoder] Staging upload failed.\n";
             return DECODER_ERROR_DECODE_FAILED;
         }

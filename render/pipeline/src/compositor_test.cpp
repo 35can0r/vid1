@@ -83,20 +83,22 @@ float* ReadbackTexture(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Re
     readback_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
 
     ID3D12Resource* readback_buf = nullptr;
-    device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE, &readback_desc,
+    HRESULT hr = device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE, &readback_desc,
                                     D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback_buf));
+    if (FAILED(hr)) return nullptr;
 
     ComPtr<ID3D12CommandAllocator> cmd_alloc;
     ComPtr<ID3D12GraphicsCommandList> cmd_list;
     device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&cmd_alloc));
     device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, cmd_alloc.Get(), nullptr, IID_PPV_ARGS(&cmd_list));
 
+    // Transition target Texture2D to COPY_SOURCE state
     D3D12_RESOURCE_BARRIER barrier = {};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barrier.Transition.pResource = tex;
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
     barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
     cmd_list->ResourceBarrier(1, &barrier);
 
     D3D12_TEXTURE_COPY_LOCATION dst = {};
@@ -115,8 +117,9 @@ float* ReadbackTexture(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Re
 
     cmd_list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
 
+    // Transition target Texture2D back to COMMON state
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
     cmd_list->ResourceBarrier(1, &barrier);
 
     cmd_list->Close();
@@ -155,6 +158,7 @@ int main(int argc, char* argv[]) {
         std::cerr << "Failed to create D3D12 Device" << std::endl;
         return 1;
     }
+
 
     ComPtr<ID3D12CommandQueue> queue;
     D3D12_COMMAND_QUEUE_DESC queue_desc = {};

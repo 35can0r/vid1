@@ -86,7 +86,26 @@ namespace EffectsPipeline {
         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         copyCommandList->ResourceBarrier(1, &barrier);
 
-        copyCommandList->CopyBufferRegion(gpuTexture, 0, uploadBuffer.Get(), 0, sizeInBytes);
+        D3D12_RESOURCE_DESC desc = gpuTexture->GetDesc();
+        if (desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D) {
+            D3D12_TEXTURE_COPY_LOCATION dst = {};
+            dst.pResource = gpuTexture;
+            dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            dst.SubresourceIndex = 0;
+
+            D3D12_TEXTURE_COPY_LOCATION src = {};
+            src.pResource = uploadBuffer.Get();
+            src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            src.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+            src.PlacedFootprint.Footprint.Width = static_cast<UINT>(desc.Width);
+            src.PlacedFootprint.Footprint.Height = desc.Height;
+            src.PlacedFootprint.Footprint.Depth = 1;
+            src.PlacedFootprint.Footprint.RowPitch = static_cast<UINT>(desc.Width * 4 * sizeof(float));
+
+            copyCommandList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        } else {
+            copyCommandList->CopyBufferRegion(gpuTexture, 0, uploadBuffer.Get(), 0, sizeInBytes);
+        }
 
         // Transition gpuTexture back from COPY_DEST to COMMON
         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
