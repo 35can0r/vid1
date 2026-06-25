@@ -12,44 +12,48 @@ fn main() {
         .unwrap()
         .to_path_buf();
 
-    // Configure CMake (ARM64 Release)
     let build_dir = root.join("render/build");
     let vcpkg_root = std::env::var("VCPKG_ROOT").unwrap_or_else(|_| "D:/k50i/vcpkg".to_string());
     
-    let configure_status = Command::new("cmake")
-        .args([
-            "-B",
-            build_dir.to_str().unwrap(),
-            "-S",
-            root.join("render").to_str().unwrap(),
-            "-A",
-            "ARM64",
-            "-DCMAKE_BUILD_TYPE=Release",
-            &format!(
-                "-DCMAKE_TOOLCHAIN_FILE={}/vcpkg/scripts/buildsystems/vcpkg.cmake",
-                vcpkg_root
-            ),
-            "-DVCPKG_TARGET_TRIPLET=arm64-windows",
-        ])
-        .status()
-        .expect("Failed to start cmake configure");
+    if std::env::var("SKIP_CMAKE").is_ok() {
+        println!("cargo:warning=Skipping CMake build due to SKIP_CMAKE environment variable.");
+    } else {
+        // Configure CMake (ARM64 Release)
+        let configure_status = Command::new("cmake")
+            .args([
+                "-B",
+                build_dir.to_str().unwrap(),
+                "-S",
+                root.join("render").to_str().unwrap(),
+                "-A",
+                "ARM64",
+                "-DCMAKE_BUILD_TYPE=Release",
+                &format!(
+                    "-DCMAKE_TOOLCHAIN_FILE={}/vcpkg/scripts/buildsystems/vcpkg.cmake",
+                    vcpkg_root
+                ),
+                "-DVCPKG_TARGET_TRIPLET=arm64-windows",
+            ])
+            .status()
+            .expect("Failed to start cmake configure");
 
-    if !configure_status.success() {
-        panic!("cmake configure failed with status: {:?}", configure_status);
-    }
+        if !configure_status.success() {
+            panic!("cmake configure failed with status: {:?}", configure_status);
+        }
 
-    let build_status = Command::new("cmake")
-        .args([
-            "--build",
-            build_dir.to_str().unwrap(),
-            "--config",
-            "Release",
-        ])
-        .status()
-        .expect("Failed to start cmake build");
+        let build_status = Command::new("cmake")
+            .args([
+                "--build",
+                build_dir.to_str().unwrap(),
+                "--config",
+                "Release",
+            ])
+            .status()
+            .expect("Failed to start cmake build");
 
-    if !build_status.success() {
-        panic!("cmake build failed with status: {:?}", build_status);
+        if !build_status.success() {
+            panic!("cmake build failed with status: {:?}", build_status);
+        }
     }
 
     // Tell cargo where to find the .lib files
@@ -94,6 +98,12 @@ fn main() {
     println!("cargo:rustc-cdylib-link-arg=/EXPORT:presenter_resize");
     println!("cargo:rustc-cdylib-link-arg=/EXPORT:presenter_destroy");
     println!("cargo:rustc-cdylib-link-arg=/EXPORT:render_frame");
+    println!("cargo:rustc-cdylib-link-arg=/EXPORT:audio_engine_create");
+    println!("cargo:rustc-cdylib-link-arg=/EXPORT:audio_engine_play");
+    println!("cargo:rustc-cdylib-link-arg=/EXPORT:audio_engine_pause");
+    println!("cargo:rustc-cdylib-link-arg=/EXPORT:audio_engine_stop");
+    println!("cargo:rustc-cdylib-link-arg=/EXPORT:audio_engine_current_frame");
+    println!("cargo:rustc-cdylib-link-arg=/EXPORT:audio_engine_destroy");
     // Undo / redo stack – defined in core/src/ffi.rs.
     println!("cargo:rustc-cdylib-link-arg=/EXPORT:timeline_undo_stack_init");
     println!("cargo:rustc-cdylib-link-arg=/EXPORT:timeline_undo_stack_free");

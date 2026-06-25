@@ -49,6 +49,26 @@ namespace PalmierPro.Engine
         [LibraryImport(LibraryName)]
         public static partial nint render_frame(nint renderer, nint timeline, long frame_number);
 
+        // ── Audio Engine ─────────────────────────────────────────────────────
+
+        [LibraryImport(LibraryName)]
+        public static partial nint audio_engine_create(nint timelineHandle);
+
+        [LibraryImport(LibraryName)]
+        public static partial void audio_engine_play(nint engine, long fromFrame);
+
+        [LibraryImport(LibraryName)]
+        public static partial void audio_engine_pause(nint engine);
+
+        [LibraryImport(LibraryName)]
+        public static partial void audio_engine_stop(nint engine);
+
+        [LibraryImport(LibraryName)]
+        public static partial long audio_engine_current_frame(nint engine);
+
+        [LibraryImport(LibraryName)]
+        public static partial void audio_engine_destroy(nint engine);
+
         // ── Undo / Redo stack lifecycle ──────────────────────────────────────
         // Call timeline_undo_stack_init immediately after timeline_from_json to
         // register a fresh UndoRedoStack for this handle. Call
