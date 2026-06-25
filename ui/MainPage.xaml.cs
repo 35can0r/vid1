@@ -26,11 +26,14 @@ namespace ui
         private DispatcherTimer _playbackTimer = new();
         private IntPtr _engine = IntPtr.Zero;
         private IntPtr _presenter = IntPtr.Zero;
+        private bool _isInitialized = false;
+        private bool _firstFrameLogged = false;
 
         public MainPage()
         {
             InitializeComponent();
-            Loaded += MainPage_Loaded;
+            PreviewCanvas.SizeChanged += OnPreviewCanvasSizeChanged;
+            this.Loaded += OnPageLoaded;
             Unloaded += MainPage_Unloaded;
 
             // Setup Playback Timer (30fps = 33.3ms interval)
@@ -38,20 +41,66 @@ namespace ui
             _playbackTimer.Tick += PlaybackTimer_Tick;
         }
 
-        private void MainPage_Loaded(object sender, RoutedEventArgs e)
+        private void OnPreviewCanvasSizeChanged(object sender, SizeChangedEventArgs e)
         {
+            if (_isInitialized && _presenter != IntPtr.Zero)
+            {
+                NativeMethods.presenter_resize(_presenter, (uint)e.NewSize.Width, (uint)e.NewSize.Height);
+            }
+        }
+
+        private async void OnPageLoaded(object sender, RoutedEventArgs e)
+        {
+            System.Diagnostics.Debug.WriteLine("[Init] Page loaded. Starting D3D12 init...");
+            Console.WriteLine("[Init] Page loaded. Starting D3D12 init...");
+
             InitializeMediaBrowser();
             InitializeMockTimeline();
             InitializeRustFFI();
 
-            // 1. Boot the C++ DX12 Rendering Engine
-            _engine = NativeMethods.renderer_create(_timeline.width, _timeline.height);
+            uint canvasWidth = (uint)PreviewCanvas.ActualWidth;
+            uint canvasHeight = (uint)PreviewCanvas.ActualHeight;
 
-            // 2. Hook the C++ Render Engine to the WinUI 3 SwapChainPanel
-            var panelNative = PreviewCanvas.As<PalmierPro.Engine.ISwapChainPanelNative>();
-            nint panelPtr = Marshal.GetIUnknownForObject(panelNative);
+            // Fallback if size is 0 initially
+            if (canvasWidth == 0) canvasWidth = (uint)_timeline.width;
+            if (canvasHeight == 0) canvasHeight = (uint)_timeline.height;
 
-            _presenter = NativeMethods.presenter_create(panelPtr, _engine, _timeline.width, _timeline.height);
+            // XAML has now rendered. Initialize D3D12 off the UI thread.
+            await Task.Run(() => {
+                _engine = NativeMethods.renderer_create(canvasWidth, canvasHeight);
+            });
+
+            System.Diagnostics.Debug.WriteLine($"[Init] renderer_create returned: 0x{_engine.ToInt64():X}");
+            Console.WriteLine($"[Init] renderer_create returned: 0x{_engine.ToInt64():X}");
+
+            if (_engine == IntPtr.Zero)
+            {
+                System.Diagnostics.Debug.WriteLine("[Init] ERROR: renderer_create returned null!");
+                Console.WriteLine("[Init] ERROR: renderer_create returned null!");
+                return;
+            }
+
+            try
+            {
+                // Back on UI thread: attach swapchain NOW that panel has valid size
+                nint panelNativePtr = IntPtr.Zero;
+                unsafe
+                {
+                    var guid = typeof(PalmierPro.Engine.ISwapChainPanelNative).GUID;
+                    var unk = Marshal.GetIUnknownForObject(PreviewCanvas);
+                    Marshal.QueryInterface(unk, ref guid, out panelNativePtr);
+                    Marshal.Release(unk);
+                }
+
+                _presenter = NativeMethods.presenter_create(panelNativePtr, _engine, canvasWidth, canvasHeight);
+                System.Diagnostics.Debug.WriteLine($"[Init] presenter_create returned: 0x{_presenter.ToInt64():X}");
+                Console.WriteLine($"[Init] presenter_create returned: 0x{_presenter.ToInt64():X}");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[Init] Exception during presenter creation: {ex}");
+                Console.WriteLine($"[Init] Exception during presenter creation: {ex}");
+            }
 
             // Connect event handlers
             TimelineEditor.ClipPositionChanged += OnClipPositionChanged;
@@ -59,6 +108,8 @@ namespace ui
             
             // Set initial playhead timecode
             OnPlayheadPositionChanged(TimelineEditor.PlayheadFrame);
+
+            _isInitialized = true;
             RenderCurrentFrame();
         }
 
@@ -254,18 +305,45 @@ namespace ui
 
         private void RenderCurrentFrame()
         {
-            if (_presenter != IntPtr.Zero && _engine != IntPtr.Zero)
+            if (!_isInitialized || _presenter == IntPtr.Zero || _engine == IntPtr.Zero) return;
+
+            try
             {
                 long frame = TimelineEditor.PlayheadFrame;
                 nint output = NativeMethods.render_frame(_engine, frame);
-                NativeMethods.presenter_present(_presenter, output);
+                if (output != IntPtr.Zero)
+                {
+                    NativeMethods.presenter_present(_presenter, output);
+                    if (!_firstFrameLogged)
+                    {
+                        _firstFrameLogged = true;
+                        System.Diagnostics.Debug.WriteLine("[Tick] First frame rendered.");
+                        Console.WriteLine("[Tick] First frame rendered.");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[Render Error] {ex.Message}");
+                Console.WriteLine($"[Render Error] {ex.Message}");
             }
         }
 
         private void PlaybackTimer_Tick(object sender, object e)
         {
-            TimelineEditor.SetPlayheadFrame(TimelineEditor.PlayheadFrame + 1);
-            RenderCurrentFrame();
+            if (!_isInitialized || _engine == IntPtr.Zero || _presenter == IntPtr.Zero) return;
+
+            try
+            {
+                TimelineEditor.SetPlayheadFrame(TimelineEditor.PlayheadFrame + 1);
+                RenderCurrentFrame();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[Tick Error] {ex.Message}");
+                Console.WriteLine($"[Tick Error] {ex.Message}");
+                _playbackTimer.Stop();
+            }
         }
 
         private void OnPlayClick(object sender, RoutedEventArgs e)

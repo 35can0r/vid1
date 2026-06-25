@@ -35,6 +35,9 @@ namespace PalmierPro.Engine
         public static partial void presenter_present(nint presenter, nint outputTexture);
 
         [LibraryImport(LibraryName)]
+        public static partial void presenter_resize(nint presenter, uint width, uint height);
+
+        [LibraryImport(LibraryName)]
         public static partial void presenter_destroy(nint presenter);
 
         [LibraryImport(LibraryName)]

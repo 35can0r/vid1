@@ -1,8 +1,17 @@
 #include "preview_presenter.h"
 #include "../include/renderer.h"
 #include <stdexcept>
+#include <iostream>
 #include <d3dcompiler.h>
-#include <windows.ui.xaml.media.dxinterop.h> // ISwapChainPanelNative
+#include <unknwn.h>
+
+// Forward declarations
+struct IDXGISwapChain;
+
+// WinUI 3 ISwapChainPanelNative interface definition
+struct __declspec(uuid("63aad0b8-7c24-40ff-85a8-640d944cc325")) ISwapChainPanelNative : public IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE SetSwapChain(IDXGISwapChain* swapChain) = 0;
+};
 
 using Microsoft::WRL::ComPtr;
 
@@ -362,12 +371,19 @@ void PreviewPresenter::wait_gpu() {
 
 extern "C" {
     PresenterHandle* presenter_create(void* swap_chain_panel_native, RendererHandle* engine, uint32_t width, uint32_t height) {
-        if (!engine) return nullptr;
+        if (!engine) {
+            std::cerr << "[presenter_create] Error: engine is null" << std::endl;
+            return nullptr;
+        }
         ID3D12Device* device = render_engine_get_device(engine);
         ID3D12CommandQueue* queue = render_engine_get_queue(engine);
-        if (!device || !queue) return nullptr;
+        if (!device || !queue) {
+            std::cerr << "[presenter_create] Error: device=" << device << ", queue=" << queue << std::endl;
+            return nullptr;
+        }
 
         try {
+            std::cout << "[presenter_create] Creating PreviewPresenter, panel=" << swap_chain_panel_native << std::endl;
             auto* presenter = new PreviewPresenter(
                 static_cast<IUnknown*>(swap_chain_panel_native),
                 device,
@@ -375,8 +391,13 @@ extern "C" {
                 width,
                 height
             );
+            std::cout << "[presenter_create] PreviewPresenter created successfully" << std::endl;
             return reinterpret_cast<PresenterHandle*>(presenter);
+        } catch (const std::exception& e) {
+            std::cerr << "[presenter_create] std::exception caught: " << e.what() << std::endl;
+            return nullptr;
         } catch (...) {
+            std::cerr << "[presenter_create] Unknown exception caught" << std::endl;
             return nullptr;
         }
     }
