@@ -41,7 +41,7 @@ namespace PalmierPro.Engine
         public static partial void presenter_destroy(nint presenter);
 
         [LibraryImport(LibraryName)]
-        public static partial nint render_frame(nint renderer, long frame_number);
+        public static partial nint render_frame(nint renderer, nint timeline, long frame_number);
     }
 
     [System.Runtime.InteropServices.ComImport]

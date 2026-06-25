@@ -5,15 +5,40 @@
 #include "../include/compositor.h"
 #include "video_decoder.h"
 #include <iostream>
+#include <unordered_map>
+#include <string>
+#include <vector>
 
 using Microsoft::WRL::ComPtr;
+
+struct ActiveClipC {
+    uint8_t clip_id[37];
+    uint8_t media_ref[37];
+    int64_t source_frame;
+    uint32_t track_index;
+    float center_x;
+    float center_y;
+    float width;
+    float height;
+    float rotation;
+    float crop_left;
+    float crop_top;
+    float crop_right;
+    float crop_bottom;
+    float exposure;
+    float contrast;
+    float temperature;
+    float tint;
+    float saturation;
+    float opacity;
+};
 
 struct RendererHandle {
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12CommandQueue> queue;
     TexturePool* pool;
     CompositorHandle compositor;
-    DecoderHandle* decoder = nullptr;
+    std::unordered_map<std::string, DecoderHandle*> decoder_cache;
     uint32_t width;
     uint32_t height;
     int last_slot = -1;
@@ -48,25 +73,15 @@ extern "C" {
         // 4. Initialize the Compositor
         r->compositor = compositor_create(r->device.Get(), r->queue.Get(), canvas_width, canvas_height);
 
-        // 5. Initialize the Video Decoder with fallback paths to handle working directory mismatches
-        r->decoder = decoder_open("sample.mp4");
-        if (!r->decoder) r->decoder = decoder_open("../sample.mp4");
-        if (!r->decoder) r->decoder = decoder_open("../../sample.mp4");
-        if (!r->decoder) r->decoder = decoder_open("../../../sample.mp4");
-        if (!r->decoder) r->decoder = decoder_open("../../../../sample.mp4");
-
-        if (r->decoder) {
-            std::cout << "[RenderEngine] Loaded sample.mp4 successfully for preview." << std::endl;
-        } else {
-            std::cerr << "[RenderEngine] Warning: Failed to locate sample.mp4." << std::endl;
-        }
-
         return r;
     }
 
     void renderer_destroy(RendererHandle* r) {
         if (r) {
-            if (r->decoder) decoder_close(r->decoder);
+            for (auto& pair : r->decoder_cache) {
+                if (pair.second) decoder_close(pair.second);
+            }
+            r->decoder_cache.clear();
             if (r->compositor) compositor_destroy(r->compositor);
             if (r->pool) delete r->pool;
             delete r;
@@ -81,7 +96,7 @@ extern "C" {
         return r ? r->queue.Get() : nullptr;
     }
 
-    TextureHandle* render_frame(RendererHandle* r, int64_t frame_number) {
+    TextureHandle* render_frame(RendererHandle* r, void* timeline, int64_t frame_number) {
         if (!r || !r->compositor || !r->pool) return nullptr;
 
         // Release the previous frame's slot to prevent pool exhaustion
@@ -98,51 +113,77 @@ extern "C" {
         r->last_slot = slot;
         TextureHandle* output_texture = r->pool->get_resource(slot);
 
-        // Decode frame if decoder is active
-        TextureHandle* layer_texture = nullptr;
-        int layer_slot = -1;
-        if (r->decoder) {
-            layer_slot = r->pool->acquire();
-            if (layer_slot >= 0) {
-                layer_texture = r->pool->get_resource(layer_slot);
-                decoder_seek(r->decoder, frame_number);
-                decoder_decode_frame(r->decoder, layer_texture);
-            }
-        }
-
         CompositeResult result = {};
-        if (layer_texture) {
-            LayerDesc layer = {};
-            layer.texture = layer_texture;
-            layer.opacity = 1.0f;
-            layer.transform.center_x = 0.5f;
-            layer.transform.center_y = 0.5f;
-            layer.transform.width = 1.0f;
-            layer.transform.height = 1.0f;
-            layer.transform.rotation = 0.0f;
-            layer.crop = { 0.0f, 0.0f, 0.0f, 0.0f };
-            layer.grade = { 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, {0,0,0} };
 
-            result = compositor_composite_async(r->compositor, &layer, 1, output_texture);
-        } else {
-            result = compositor_composite_async(r->compositor, nullptr, 0, output_texture);
+        ActiveClipC* active_clips = nullptr;
+        int32_t count = 0;
+
+        if (timeline) {
+            count = timeline_get_active_clips(timeline, frame_number, &active_clips);
         }
 
-        // Wait on fence
-        if (result.fence && result.fence->GetCompletedValue() < result.fence_value) {
-            HANDLE event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-            if (event) {
-                result.fence->SetEventOnCompletion(result.fence_value, event);
-                WaitForSingleObject(event, INFINITE);
-                CloseHandle(event);
+        if (count > 0 && active_clips) {
+            std::vector<LayerDesc> layers;
+            std::vector<int> acquired_slots;
+
+            for (int32_t i = 0; i < count; ++i) {
+                ActiveClipC* clip = active_clips + i;
+
+                std::string media_ref_str((char*)clip->media_ref);
+                DecoderHandle* dec = nullptr;
+
+                auto it = r->decoder_cache.find(media_ref_str);
+                if (it != r->decoder_cache.end()) {
+                    dec = it->second;
+                } else {
+                    char* resolved_path = timeline_resolve_media((const char*)clip->media_ref);
+                    if (resolved_path) {
+                        dec = decoder_open(resolved_path);
+                        if (!dec) dec = decoder_open((std::string("../") + resolved_path).c_str());
+                        if (!dec) dec = decoder_open((std::string("../../") + resolved_path).c_str());
+                        if (!dec) dec = decoder_open((std::string("../../../") + resolved_path).c_str());
+                        if (dec) {
+                            r->decoder_cache[media_ref_str] = dec;
+                        }
+                        string_free(resolved_path);
+                    }
+                }
+
+                if (dec) {
+                    int layer_slot = r->pool->acquire();
+                    if (layer_slot >= 0) {
+                        TextureHandle* layer_texture = r->pool->get_resource(layer_slot);
+                        decoder_seek(dec, clip->source_frame);
+                        decoder_decode_frame(dec, layer_texture);
+                        acquired_slots.push_back(layer_slot);
+
+                        LayerDesc layer = {};
+                        layer.texture = layer_texture;
+                        layer.opacity = clip->opacity;
+                        layer.transform.center_x = clip->center_x;
+                        layer.transform.center_y = clip->center_y;
+                        layer.transform.width = clip->width;
+                        layer.transform.height = clip->height;
+                        layer.transform.rotation = clip->rotation;
+                        layer.crop = { clip->crop_left, clip->crop_top, clip->crop_right, clip->crop_bottom };
+                        layer.grade = { clip->exposure, clip->contrast, clip->temperature, clip->tint, clip->saturation, {0,0,0} };
+
+                        layers.push_back(layer);
+                    }
+                }
             }
+
+            compositor_composite(r->compositor, layers.data(), layers.size(), output_texture);
+
+            for (int s : acquired_slots) {
+                r->pool->release(s);
+            }
+
+            active_clips_free(active_clips, count);
+        } else {
+            compositor_composite(r->compositor, nullptr, 0, output_texture);
         }
 
-        // Release the temporary slot back to the pool immediately after rendering
-        if (layer_slot >= 0) {
-            r->pool->release(layer_slot);
-        }
-
-        return result.output;
+        return output_texture;
     }
 }

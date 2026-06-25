@@ -12,6 +12,8 @@ use std::net::SocketAddr;
 use uuid::Uuid;
 use tower_http::cors::CorsLayer;
 
+pub mod tools;
+
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
     jsonrpc: String,
@@ -430,6 +432,19 @@ async fn handle_rpc_call(
                             "type": "object",
                             "properties": {}
                         }
+                    },
+                    {
+                        "name": "import_media",
+                        "description": "Import a media file into the project.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "source_path": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": ["source_path"]
+                        }
                     }
                 ]
             });
@@ -520,6 +535,17 @@ async fn handle_rpc_call(
                 Ok(_) => JsonRpcResponse {
                     jsonrpc: "2.0".to_string(),
                     result: Some(serde_json::json!({ "status": "success" })),
+                    error: None,
+                    id,
+                },
+                Err(e) => make_error_response(-32000, e, None, id),
+            }
+        }
+        "import_media" => {
+            match tools::import_media::execute(method_args) {
+                Ok(res) => JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    result: Some(res),
                     error: None,
                     id,
                 },
