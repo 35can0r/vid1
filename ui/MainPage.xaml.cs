@@ -25,6 +25,7 @@ namespace ui
         private IntPtr _timelinePtr = IntPtr.Zero;
         private DispatcherTimer _playbackTimer = new();
         private IntPtr _engine = IntPtr.Zero;
+        private IntPtr _audioEngine = IntPtr.Zero;
         private IntPtr _presenter = IntPtr.Zero;
         private System.IO.FileSystemWatcher? _mediaWatcher = null;
         private bool _isInitialized = false;
@@ -96,8 +97,9 @@ namespace ui
                 _engine = NativeMethods.renderer_create(canvasWidth, canvasHeight);
             });
 
-            System.Diagnostics.Debug.WriteLine($"[Init] renderer_create returned: 0x{_engine.ToInt64():X}");
-            Console.WriteLine($"[Init] renderer_create returned: 0x{_engine.ToInt64():X}");
+            _audioEngine = NativeMethods.audio_engine_create(_timelinePtr);
+            System.Diagnostics.Debug.WriteLine($"[Init] renderer_create returned: 0x{_engine.ToInt64():X}, audio_engine: 0x{_audioEngine.ToInt64():X}");
+            Console.WriteLine($"[Init] renderer_create returned: 0x{_engine.ToInt64():X}, audio_engine: 0x{_audioEngine.ToInt64():X}");
 
             if (_engine == IntPtr.Zero)
             {
@@ -166,6 +168,11 @@ namespace ui
             {
                 NativeMethods.renderer_destroy(_engine);
                 _engine = IntPtr.Zero;
+            }
+            if (_audioEngine != IntPtr.Zero)
+            {
+                NativeMethods.audio_engine_destroy(_audioEngine);
+                _audioEngine = IntPtr.Zero;
             }
             _playbackTimer.Stop();
         }
@@ -479,7 +486,6 @@ namespace ui
 
         private void PlaybackTimer_Tick(object sender, object e)
         {
-            Console.WriteLine($"[Tick] Tick event triggered. _isInitialized={_isInitialized}, _engine={_engine.ToInt64():X}, _presenter={_presenter.ToInt64():X}");
             if (!_isInitialized || _engine == IntPtr.Zero || _presenter == IntPtr.Zero) return;
   
             try
@@ -489,12 +495,18 @@ namespace ui
                 {
                     totalFrames = NativeMethods.timeline_total_frames(_timelinePtr);
                 }
-                Console.WriteLine($"[Tick] totalFrames={totalFrames}, currentPlayheadFrame={TimelineEditor.PlayheadFrame}");
   
-                long currentFrame = TimelineEditor.PlayheadFrame;
+                long currentFrame = (_audioEngine != IntPtr.Zero)
+                    ? NativeMethods.audio_engine_current_frame(_audioEngine)
+                    : TimelineEditor.PlayheadFrame + 1;
+
                 if (currentFrame >= totalFrames)
                 {
                     Console.WriteLine($"[Tick] currentFrame ({currentFrame}) >= totalFrames ({totalFrames}). Stopping playback.");
+                    if (_audioEngine != IntPtr.Zero)
+                    {
+                        NativeMethods.audio_engine_stop(_audioEngine);
+                    }
                     _playbackTimer.Stop();
                     currentFrame = 0;
                     TimelineEditor.SetPlayheadFrame(0);
@@ -502,9 +514,7 @@ namespace ui
                 }
                 else
                 {
-                    currentFrame += 1;
                     TimelineEditor.SetPlayheadFrame(currentFrame);
-                    Console.WriteLine($"[Tick] Incremented playhead to frame {currentFrame}");
                 }
   
                 RenderCurrentFrame();
@@ -517,6 +527,10 @@ namespace ui
             {
                 System.Diagnostics.Debug.WriteLine($"[Tick Error] {ex.Message}");
                 Console.WriteLine($"[Tick Error] {ex.Message}");
+                if (_audioEngine != IntPtr.Zero)
+                {
+                    NativeMethods.audio_engine_pause(_audioEngine);
+                }
                 _playbackTimer.Stop();
             }
         }
@@ -524,32 +538,48 @@ namespace ui
         private void OnPlayClick(object sender, RoutedEventArgs e)
         {
             var btn = (Button)sender;
-            Console.WriteLine($"[PlayClick] Button clicked. _playbackTimer.IsEnabled={_playbackTimer.IsEnabled}, Interval={_playbackTimer.Interval.TotalMilliseconds}ms");
             if (_playbackTimer.IsEnabled)
             {
+                if (_audioEngine != IntPtr.Zero)
+                {
+                    NativeMethods.audio_engine_pause(_audioEngine);
+                }
                 _playbackTimer.Stop();
                 btn.Content = "\uE768"; // Play Icon
             }
             else
             {
+                if (_audioEngine != IntPtr.Zero)
+                {
+                    NativeMethods.audio_engine_play(_audioEngine, TimelineEditor.PlayheadFrame);
+                }
                 _playbackTimer.Start();
                 btn.Content = "\uE769"; // Pause Icon
             }
-            Console.WriteLine($"[PlayClick] After action: _playbackTimer.IsEnabled={_playbackTimer.IsEnabled}");
         }
 
         private void OnPrevFrameClick(object sender, RoutedEventArgs e)
         {
+            if (_audioEngine != IntPtr.Zero)
+            {
+                NativeMethods.audio_engine_pause(_audioEngine);
+            }
             _playbackTimer.Stop();
             TimelineEditor.SetPlayheadFrame(TimelineEditor.PlayheadFrame - 1);
             RenderCurrentFrame();
+            if (PlayButton != null) PlayButton.Content = "\uE768";
         }
 
         private void OnNextFrameClick(object sender, RoutedEventArgs e)
         {
+            if (_audioEngine != IntPtr.Zero)
+            {
+                NativeMethods.audio_engine_pause(_audioEngine);
+            }
             _playbackTimer.Stop();
             TimelineEditor.SetPlayheadFrame(TimelineEditor.PlayheadFrame + 1);
             RenderCurrentFrame();
+            if (PlayButton != null) PlayButton.Content = "\uE768";
         }
 
         private void OnZoomSliderChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
