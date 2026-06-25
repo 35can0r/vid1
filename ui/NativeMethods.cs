@@ -23,6 +23,12 @@ namespace PalmierPro.Engine
         public static partial void string_free(IntPtr ptr);
 
         [LibraryImport(LibraryName)]
+        public static partial long timeline_total_frames(IntPtr handle);
+
+        [LibraryImport(LibraryName)]
+        public static partial double timeline_fps(IntPtr handle);
+
+        [LibraryImport(LibraryName)]
         public static partial nint renderer_create(uint canvas_width, uint canvas_height);
 
         [LibraryImport(LibraryName)]
@@ -42,6 +48,41 @@ namespace PalmierPro.Engine
 
         [LibraryImport(LibraryName)]
         public static partial nint render_frame(nint renderer, nint timeline, long frame_number);
+
+        // ── Undo / Redo stack lifecycle ──────────────────────────────────────
+        // Call timeline_undo_stack_init immediately after timeline_from_json to
+        // register a fresh UndoRedoStack for this handle. Call
+        // timeline_undo_stack_free just before timeline_free to avoid leaking.
+        [LibraryImport(LibraryName)]
+        public static partial void timeline_undo_stack_init(nint handle);
+
+        [LibraryImport(LibraryName)]
+        public static partial void timeline_undo_stack_free(nint handle);
+
+        /// <summary>
+        /// Save a before-snapshot of the current timeline state.
+        /// Call this BEFORE any mutation so that Ctrl+Z can restore it.
+        /// </summary>
+        [LibraryImport(LibraryName)]
+        public static partial void timeline_checkpoint(nint handle);
+
+        [LibraryImport(LibraryName)]
+        [return: MarshalAs(UnmanagedType.U1)]
+        public static partial bool timeline_undo(nint handle);
+
+        [LibraryImport(LibraryName)]
+        [return: MarshalAs(UnmanagedType.U1)]
+        public static partial bool timeline_redo(nint handle);
+
+        [LibraryImport(LibraryName, StringMarshalling = StringMarshalling.Utf8)]
+        [return: MarshalAs(UnmanagedType.U1)]
+        public static partial bool timeline_update_from_json(nint handle, string jsonUtf8, nuint len);
+
+        [LibraryImport(LibraryName)]
+        public static partial IntPtr media_get_all_json(nint handle);
+
+        [LibraryImport(LibraryName)]
+        public static partial void palmier_free_string(IntPtr ptr);
     }
 
     [System.Runtime.InteropServices.ComImport]

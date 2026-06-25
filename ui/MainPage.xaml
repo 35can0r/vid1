@@ -83,7 +83,7 @@
                     
                     <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="15" HorizontalAlignment="Center">
                         <Button Content="&#xE892;" FontFamily="Segoe MDL2 Assets" Background="Transparent" BorderThickness="0" Foreground="#E1E1E6" FontSize="16" Click="OnPrevFrameClick" />
-                        <Button Content="&#xE768;" FontFamily="Segoe MDL2 Assets" Background="#3A86FF" BorderThickness="0" CornerRadius="18" Width="36" Height="36" Foreground="White" FontSize="14" Click="OnPlayClick" />
+                        <Button x:Name="PlayButton" Content="&#xE768;" FontFamily="Segoe MDL2 Assets" Background="#3A86FF" BorderThickness="0" CornerRadius="18" Width="36" Height="36" Foreground="White" FontSize="14" Click="OnPlayClick" />
                         <Button Content="&#xE893;" FontFamily="Segoe MDL2 Assets" Background="Transparent" BorderThickness="0" Foreground="#E1E1E6" FontSize="16" Click="OnNextFrameClick" />
                     </StackPanel>
 
@@ -114,8 +114,16 @@
                 
                 <StackPanel Orientation="Horizontal" Spacing="15">
                     <TextBlock Text="Timeline Editor" FontWeight="Bold" FontSize="15" Foreground="#E1E1E6" VerticalAlignment="Center" />
-                    <Button Content="Undo" FontSize="12" Click="OnUndoClick" Background="#28282C" BorderBrush="#3E3E44" Foreground="#E1E1E6" />
-                    <Button Content="Redo" FontSize="12" Click="OnRedoClick" Background="#28282C" BorderBrush="#3E3E44" Foreground="#E1E1E6" />
+                    <Button Content="Undo" FontSize="12" Click="OnUndoClick" Background="#28282C" BorderBrush="#3E3E44" Foreground="#E1E1E6">
+                        <Button.KeyboardAccelerators>
+                            <KeyboardAccelerator Key="Z" Modifiers="Control" />
+                        </Button.KeyboardAccelerators>
+                    </Button>
+                    <Button Content="Redo" FontSize="12" Click="OnRedoClick" Background="#28282C" BorderBrush="#3E3E44" Foreground="#E1E1E6">
+                        <Button.KeyboardAccelerators>
+                            <KeyboardAccelerator Key="Y" Modifiers="Control" />
+                        </Button.KeyboardAccelerators>
+                    </Button>
                 </StackPanel>
 
                 <TextBlock Grid.Column="1" x:Name="FFIStatusText" Text="Rust FFI: Loaded" FontSize="11" Foreground="#00E676" VerticalAlignment="Center" />

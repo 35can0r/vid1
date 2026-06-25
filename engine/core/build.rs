@@ -91,8 +91,15 @@ fn main() {
     println!("cargo:rustc-cdylib-link-arg=/EXPORT:renderer_destroy");
     println!("cargo:rustc-cdylib-link-arg=/EXPORT:presenter_create");
     println!("cargo:rustc-cdylib-link-arg=/EXPORT:presenter_present");
+    println!("cargo:rustc-cdylib-link-arg=/EXPORT:presenter_resize");
     println!("cargo:rustc-cdylib-link-arg=/EXPORT:presenter_destroy");
     println!("cargo:rustc-cdylib-link-arg=/EXPORT:render_frame");
+    // Undo / redo stack – defined in core/src/ffi.rs.
+    println!("cargo:rustc-cdylib-link-arg=/EXPORT:timeline_undo_stack_init");
+    println!("cargo:rustc-cdylib-link-arg=/EXPORT:timeline_undo_stack_free");
+    println!("cargo:rustc-cdylib-link-arg=/EXPORT:timeline_checkpoint");
+    println!("cargo:rustc-cdylib-link-arg=/EXPORT:timeline_undo");
+    println!("cargo:rustc-cdylib-link-arg=/EXPORT:timeline_redo");
 
     // Copy DirectML.dll and FFmpeg DLLs to the target output directory
     let target_dir = out_dir

@@ -1,19 +1,23 @@
 use crate::timeline::Timeline;
+use crate::EngineHandle;
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::ptr;
 use serde_json;
 
 #[unsafe(no_mangle)]
-pub extern "C" fn timeline_new(width: u32, height: u32, fps: f64) -> *mut Timeline {
+pub extern "C" fn timeline_new(width: u32, height: u32, fps: f64) -> *mut EngineHandle {
     if !fps.is_finite() {
         return ptr::null_mut();
     }
-    Box::into_raw(Box::new(Timeline::new(width, height, fps)))
+    Box::into_raw(Box::new(EngineHandle {
+        timeline: Timeline::new(width, height, fps),
+        undo_stack: crate::undo::UndoRedoStack::new(),
+    }))
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn timeline_free(ptr: *mut Timeline) {
+pub extern "C" fn timeline_free(ptr: *mut EngineHandle) {
     if !ptr.is_null() {
         unsafe {
             drop(Box::from_raw(ptr));
@@ -46,15 +50,15 @@ pub struct ActiveClipC {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn timeline_get_active_clips(
-    timeline: *const Timeline,
+    handle: *const EngineHandle,
     frame_number: i64,
     out_clips: *mut *mut ActiveClipC,
 ) -> i32 {
-    if timeline.is_null() || out_clips.is_null() {
+    if handle.is_null() || out_clips.is_null() {
         return 0;
     }
 
-    let timeline = unsafe { &*timeline };
+    let timeline = unsafe { &(*handle).timeline };
     let mut active_clips = Vec::new();
 
     for (track_idx, track) in timeline.tracks.iter().enumerate() {
@@ -180,23 +184,23 @@ pub extern "C" fn timeline_resolve_media(media_ref: *const c_char) -> *mut c_cha
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn timeline_total_frames(timeline: *const Timeline) -> i64 {
-    if timeline.is_null() {
+pub extern "C" fn timeline_total_frames(handle: *const EngineHandle) -> i64 {
+    if handle.is_null() {
         return 0;
     }
-    unsafe { (*timeline).total_frames() }
+    unsafe { (*handle).timeline.total_frames() }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn timeline_fps(timeline: *const Timeline) -> f64 {
-    if timeline.is_null() {
+pub extern "C" fn timeline_fps(handle: *const EngineHandle) -> f64 {
+    if handle.is_null() {
         return 0.0;
     }
-    unsafe { (*timeline).fps }
+    unsafe { (*handle).timeline.fps }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn timeline_from_json(json_utf8: *const c_char, len: usize) -> *mut Timeline {
+pub extern "C" fn timeline_from_json(json_utf8: *const c_char, len: usize) -> *mut EngineHandle {
     if json_utf8.is_null() || len == 0 {
         return ptr::null_mut();
     }
@@ -204,19 +208,22 @@ pub extern "C" fn timeline_from_json(json_utf8: *const c_char, len: usize) -> *m
     let slice = unsafe { std::slice::from_raw_parts(json_utf8 as *const u8, len) };
 
     match serde_json::from_slice::<Timeline>(slice) {
-        Ok(timeline) => Box::into_raw(Box::new(timeline)),
+        Ok(timeline) => Box::into_raw(Box::new(EngineHandle {
+            timeline,
+            undo_stack: crate::undo::UndoRedoStack::new(),
+        })),
         Err(_) => ptr::null_mut(),
     }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn timeline_to_json(timeline: *const Timeline) -> *mut c_char {
-    if timeline.is_null() {
+pub extern "C" fn timeline_to_json(handle: *const EngineHandle) -> *mut c_char {
+    if handle.is_null() {
         return ptr::null_mut();
     }
 
     unsafe {
-        let timeline_ref = &*timeline;
+        let timeline_ref = &(*handle).timeline;
         match serde_json::to_string(timeline_ref) {
             Ok(json) => {
                 match CString::new(json) {
@@ -237,3 +244,193 @@ pub extern "C" fn string_free(ptr: *mut c_char) {
         }
     }
 }
+
+// ─── Stub lifecycle functions for back-compat ─────────────────────────────────
+
+#[unsafe(no_mangle)]
+pub extern "C" fn timeline_undo_stack_init(_handle: *mut EngineHandle) {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn timeline_undo_stack_free(_handle: *mut EngineHandle) {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn timeline_checkpoint(_handle: *mut EngineHandle) {}
+
+// ─── Wired Undo / Redo / Update ───────────────────────────────────────────────
+
+#[unsafe(no_mangle)]
+pub extern "C" fn timeline_undo(handle: *mut EngineHandle) -> bool {
+    if handle.is_null() { return false; }
+    let handle = unsafe { &mut *handle };
+    match handle.undo_stack.undo(&mut handle.timeline) {
+        Ok(_) => {
+            if let Ok(json) = serde_json::to_string_pretty(&handle.timeline) {
+                let _ = std::fs::write("timeline.json", json);
+            }
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn timeline_redo(handle: *mut EngineHandle) -> bool {
+    if handle.is_null() { return false; }
+    let handle = unsafe { &mut *handle };
+    match handle.undo_stack.redo(&mut handle.timeline) {
+        Ok(_) => {
+            if let Ok(json) = serde_json::to_string_pretty(&handle.timeline) {
+                let _ = std::fs::write("timeline.json", json);
+            }
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn timeline_update_from_json(
+    handle: *mut EngineHandle,
+    json_utf8: *const c_char,
+    len: usize,
+) -> bool {
+    if handle.is_null() || json_utf8.is_null() || len == 0 {
+        return false;
+    }
+    let handle = unsafe { &mut *handle };
+    let slice = unsafe { std::slice::from_raw_parts(json_utf8 as *const u8, len) };
+    
+    let Ok(new_timeline) = serde_json::from_slice::<Timeline>(slice) else {
+        return false;
+    };
+
+    let mut operations = Vec::new();
+
+    // 1. Detect moved clips
+    for old_track in &handle.timeline.tracks {
+        for old_clip in &old_track.clips {
+            for new_track in &new_timeline.tracks {
+                for new_clip in &new_track.clips {
+                    if old_clip.id == new_clip.id {
+                        if old_clip.start_frame != new_clip.start_frame || old_track.id != new_track.id {
+                            operations.push(crate::undo::Operation::MoveClip {
+                                clip_id: old_clip.id,
+                                from_track_id: old_track.id,
+                                to_track_id: new_track.id,
+                                from_start_frame: old_clip.start_frame,
+                                to_start_frame: new_clip.start_frame,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Detect newly inserted clips
+    for new_track in &new_timeline.tracks {
+        for new_clip in &new_track.clips {
+            let mut found = false;
+            for old_track in &handle.timeline.tracks {
+                for old_clip in &old_track.clips {
+                    if old_clip.id == new_clip.id {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if !found {
+                operations.push(crate::undo::Operation::InsertClip {
+                    track_id: new_track.id,
+                    clip: new_clip.clone(),
+                });
+            }
+        }
+    }
+
+    // 3. Detect deleted clips
+    for old_track in &handle.timeline.tracks {
+        for old_clip in &old_track.clips {
+            let mut found = false;
+            for new_track in &new_timeline.tracks {
+                for new_clip in &new_track.clips {
+                    if old_clip.id == new_clip.id {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if !found {
+                operations.push(crate::undo::Operation::DeleteClip {
+                    track_id: old_track.id,
+                    clip: old_clip.clone(),
+                });
+            }
+        }
+    }
+
+    // If there are operations, record them in the undo stack
+    if !operations.is_empty() {
+        handle.undo_stack.begin_transaction("UI Mutation");
+        for op in operations {
+            handle.undo_stack.record_operation(op);
+        }
+        handle.undo_stack.commit_transaction();
+    }
+
+    handle.timeline = new_timeline;
+    true
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct MediaEntry {
+    #[serde(rename = "Id")]
+    pub id: String,
+    #[serde(rename = "Name")]
+    pub name: String,
+    #[serde(rename = "Path")]
+    pub path: String,
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn media_get_all_json(_handle: *mut EngineHandle) -> *mut c_char {
+    let mut entries = Vec::new();
+    if let Ok(content) = std::fs::read_to_string("media.json") {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(obj) = json.as_object() {
+                for (k, v) in obj {
+                    if let Some(val_str) = v.as_str() {
+                        let name = std::path::Path::new(val_str)
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or(val_str)
+                            .to_string();
+                        
+                        entries.push(MediaEntry {
+                            id: k.clone(),
+                            name,
+                            path: format!("project/media/{}", val_str),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    if let Ok(serialized) = serde_json::to_string(&entries) {
+        if let Ok(c_str) = CString::new(serialized) {
+            return c_str.into_raw();
+        }
+    }
+    ptr::null_mut()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn palmier_free_string(ptr: *mut c_char) {
+    if !ptr.is_null() {
+        unsafe {
+            drop(CString::from_raw(ptr));
+        }
+    }
+}
+

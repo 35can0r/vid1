@@ -86,6 +86,9 @@ struct DecoderHandle {
     // Seeking state
     int64_t pending_seek_frame = -1;
     int64_t current_frame = -1;
+    bool draining = false;
+    bool reached_eof = false;
+    int64_t eof_frame = 999999999;
 
     // Ring buffer (LRU Cache)
     std::list<CachedFrame> cache_list;
@@ -171,9 +174,9 @@ static bool init_compute_shader(DecoderHandle* h, bool use_array) {
             "    if (dispatchThreadID.x >= Width || dispatchThreadID.y >= Height)\n"
             "        return;\n"
             "\n"
-            "    int4 texCoord = int4(dispatchThreadID.x, dispatchThreadID.y, ArrayIndex, 0);\n"
+            "    int4 texCoord = int4(dispatchThreadID.x, dispatchThreadID.y, 0, 0);\n"
             "    float yVal = InputY.Load(texCoord).r;\n"
-            "    int4 uvCoord = int4(dispatchThreadID.x / 2, dispatchThreadID.y / 2, ArrayIndex, 0);\n"
+            "    int4 uvCoord = int4(dispatchThreadID.x / 2, dispatchThreadID.y / 2, 0, 0);\n"
             "    float2 uvVal = InputUV.Load(uvCoord).rg;\n"
             "\n"
             "    // Bt.709 limited range digital YUV to RGB conversion\n"
@@ -708,11 +711,16 @@ static int get_next_decoded_frame(DecoderHandle* h, AVFrame* out_frame, int64_t&
             return ret; // Error decoding
         }
 
+        if (h->draining) {
+            return AVERROR_EOF;
+        }
+
         // Need more packet data
         av_packet_unref(h->pkt);
         ret = av_read_frame(h->fmt_ctx, h->pkt);
         if (ret < 0) {
             avcodec_send_packet(h->codec_ctx, nullptr); // Flush stream
+            h->draining = true;
             continue;
         }
 
@@ -823,6 +831,7 @@ DecoderHandle* decoder_open(const char* path) {
 
     h->pending_seek_frame = -1;
     h->current_frame = -1;
+    h->eof_frame = h->total_frames;
 
     return h;
 }
@@ -830,6 +839,10 @@ DecoderHandle* decoder_open(const char* path) {
 ErrorCode decoder_seek(DecoderHandle* h, int64_t target_frame) {
     if (!h) return DECODER_ERROR_INVALID_ARG;
     h->pending_seek_frame = target_frame;
+    if (target_frame < h->eof_frame) {
+        h->draining = false;
+        h->reached_eof = false;
+    }
     return DECODER_SUCCESS;
 }
 
@@ -859,6 +872,10 @@ ErrorCode decoder_decode_frame(DecoderHandle* h, TextureHandle* out_texture) {
         target_frame = 0;
     }
 
+    if (target_frame >= h->eof_frame) {
+        return DECODER_ERROR_EOF;
+    }
+
     // 1. Check LRU Cache
     AVFrame* cached_frame = find_in_cache(h, target_frame);
     if (cached_frame) {
@@ -880,6 +897,10 @@ ErrorCode decoder_decode_frame(DecoderHandle* h, TextureHandle* out_texture) {
 
         avcodec_flush_buffers(h->codec_ctx);
         h->current_frame = -1;
+        if (target_frame < h->eof_frame) {
+            h->draining = false;
+            h->reached_eof = false;
+        }
     }
 
     // 3. Forward decode and fill cache
@@ -896,6 +917,8 @@ ErrorCode decoder_decode_frame(DecoderHandle* h, TextureHandle* out_texture) {
         if (ret < 0) {
             av_frame_free(&temp_frame);
             if (ret == AVERROR_EOF) {
+                h->reached_eof = true;
+                h->eof_frame = target_frame;
                 return DECODER_ERROR_EOF;
             }
             return DECODER_ERROR_DECODE_FAILED;

@@ -504,6 +504,9 @@ async fn handle_rpc_call(
             
             if success {
                 stack.commit_transaction();
+                if let Ok(json_str) = serde_json::to_string_pretty(&*timeline) {
+                    let _ = std::fs::write("timeline.json", json_str);
+                }
                 JsonRpcResponse {
                     jsonrpc: "2.0".to_string(),
                     result: Some(serde_json::json!({ "status": "success" })),
@@ -519,12 +522,17 @@ async fn handle_rpc_call(
             let mut timeline = state.timeline.lock().unwrap();
             let mut stack = state.undo_stack.lock().unwrap();
             match stack.undo(&mut timeline) {
-                Ok(_) => JsonRpcResponse {
-                    jsonrpc: "2.0".to_string(),
-                    result: Some(serde_json::json!({ "status": "success" })),
-                    error: None,
-                    id,
-                },
+                Ok(_) => {
+                    if let Ok(json_str) = serde_json::to_string_pretty(&*timeline) {
+                        let _ = std::fs::write("timeline.json", json_str);
+                    }
+                    JsonRpcResponse {
+                        jsonrpc: "2.0".to_string(),
+                        result: Some(serde_json::json!({ "status": "success" })),
+                        error: None,
+                        id,
+                    }
+                }
                 Err(e) => make_error_response(-32000, e, None, id),
             }
         }
@@ -532,12 +540,17 @@ async fn handle_rpc_call(
             let mut timeline = state.timeline.lock().unwrap();
             let mut stack = state.undo_stack.lock().unwrap();
             match stack.redo(&mut timeline) {
-                Ok(_) => JsonRpcResponse {
-                    jsonrpc: "2.0".to_string(),
-                    result: Some(serde_json::json!({ "status": "success" })),
-                    error: None,
-                    id,
-                },
+                Ok(_) => {
+                    if let Ok(json_str) = serde_json::to_string_pretty(&*timeline) {
+                        let _ = std::fs::write("timeline.json", json_str);
+                    }
+                    JsonRpcResponse {
+                        jsonrpc: "2.0".to_string(),
+                        result: Some(serde_json::json!({ "status": "success" })),
+                        error: None,
+                        id,
+                    }
+                }
                 Err(e) => make_error_response(-32000, e, None, id),
             }
         }
@@ -568,8 +581,15 @@ async fn handle_post(
 async fn main() {
     tracing_subscriber::fmt::init();
 
+    let mut initial_timeline = Timeline::new(1920, 1080, 30.0);
+    if let Ok(content) = std::fs::read_to_string("timeline.json") {
+        if let Ok(timeline) = serde_json::from_str::<Timeline>(&content) {
+            initial_timeline = timeline;
+        }
+    }
+
     let state = Arc::new(ServerState {
-        timeline: Mutex::new(Timeline::new(1920, 1080, 30.0)),
+        timeline: Mutex::new(initial_timeline),
         undo_stack: Mutex::new(UndoRedoStack::new()),
     });
 

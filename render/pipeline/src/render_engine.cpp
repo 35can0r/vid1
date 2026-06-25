@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <string>
 #include <vector>
+#include <algorithm>
 
 using Microsoft::WRL::ComPtr;
 
@@ -68,10 +69,12 @@ extern "C" {
         }
 
         // 3. Initialize the VRAM TexturePool
-        r->pool = new TexturePool(r->device.Get(), canvas_width, canvas_height);
+        uint32_t pool_w = (std::max)(canvas_width,  1920u);
+        uint32_t pool_h = (std::max)(canvas_height, 1080u);
+        r->pool = new TexturePool(r->device.Get(), pool_w, pool_h, 8);
 
         // 4. Initialize the Compositor
-        r->compositor = compositor_create(r->device.Get(), r->queue.Get(), canvas_width, canvas_height);
+        r->compositor = compositor_create(r->device.Get(), r->queue.Get(), pool_w, pool_h);
 
         return r;
     }
@@ -157,6 +160,12 @@ extern "C" {
                         decoder_decode_frame(dec, layer_texture);
                         acquired_slots.push_back(layer_slot);
 
+                        MediaInfo info = decoder_get_info(dec);
+                        uint32_t pool_w = r->pool->GetWidth();
+                        uint32_t pool_h = r->pool->GetHeight();
+                        float scale_x = (float)info.width / pool_w;
+                        float scale_y = (float)info.height / pool_h;
+
                         LayerDesc layer = {};
                         layer.texture = layer_texture;
                         layer.opacity = clip->opacity;
@@ -165,7 +174,11 @@ extern "C" {
                         layer.transform.width = clip->width;
                         layer.transform.height = clip->height;
                         layer.transform.rotation = clip->rotation;
-                        layer.crop = { clip->crop_left, clip->crop_top, clip->crop_right, clip->crop_bottom };
+
+                        layer.crop.left = clip->crop_left * scale_x;
+                        layer.crop.top = clip->crop_top * scale_y;
+                        layer.crop.right = 1.0f - (1.0f - clip->crop_right) * scale_x;
+                        layer.crop.bottom = 1.0f - (1.0f - clip->crop_bottom) * scale_y;
                         layer.grade = { clip->exposure, clip->contrast, clip->temperature, clip->tint, clip->saturation, {0,0,0} };
 
                         layers.push_back(layer);

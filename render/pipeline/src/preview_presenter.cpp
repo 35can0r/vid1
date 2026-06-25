@@ -411,8 +411,14 @@ extern "C" {
 
     void presenter_resize(PresenterHandle* presenter, uint32_t width, uint32_t height) {
         if (presenter) {
-            auto* p = reinterpret_cast<PreviewPresenter*>(presenter);
-            p->resize(width, height);
+            try {
+                auto* p = reinterpret_cast<PreviewPresenter*>(presenter);
+                p->resize(width, height);
+            } catch (const std::exception& e) {
+                std::cerr << "[presenter_resize] Exception caught: " << e.what() << std::endl;
+            } catch (...) {
+                std::cerr << "[presenter_resize] Unknown exception caught" << std::endl;
+            }
         }
     }
 

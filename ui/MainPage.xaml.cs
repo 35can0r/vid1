@@ -26,11 +26,35 @@ namespace ui
         private DispatcherTimer _playbackTimer = new();
         private IntPtr _engine = IntPtr.Zero;
         private IntPtr _presenter = IntPtr.Zero;
+        private System.IO.FileSystemWatcher? _mediaWatcher = null;
         private bool _isInitialized = false;
         private bool _firstFrameLogged = false;
 
+
+
         public MainPage()
         {
+            // Set current directory to the project workspace root
+            string dir = AppDomain.CurrentDomain.BaseDirectory;
+            while (!string.IsNullOrEmpty(dir))
+            {
+                if (System.IO.File.Exists(System.IO.Path.Combine(dir, "media.json")))
+                {
+                    try
+                    {
+                        System.IO.Directory.SetCurrentDirectory(dir);
+                        System.Diagnostics.Debug.WriteLine($"[Init] Working directory set to: {dir}");
+                        Console.WriteLine($"[Init] Working directory set to: {dir}");
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[Init] Failed to set directory: {ex.Message}");
+                    }
+                    break;
+                }
+                dir = System.IO.Path.GetDirectoryName(dir);
+            }
+
             InitializeComponent();
             PreviewCanvas.SizeChanged += OnPreviewCanvasSizeChanged;
             this.Loaded += OnPageLoaded;
@@ -57,6 +81,8 @@ namespace ui
             InitializeMediaBrowser();
             InitializeMockTimeline();
             InitializeRustFFI();
+            RefreshMediaBrowser();
+            SetupMediaWatcher();
 
             uint canvasWidth = (uint)PreviewCanvas.ActualWidth;
             uint canvasHeight = (uint)PreviewCanvas.ActualHeight;
@@ -109,6 +135,15 @@ namespace ui
             // Set initial playhead timecode
             OnPlayheadPositionChanged(TimelineEditor.PlayheadFrame);
 
+            if (_timelinePtr != IntPtr.Zero)
+            {
+                double fps = NativeMethods.timeline_fps(_timelinePtr);
+                if (fps > 0.0 && !double.IsNaN(fps) && !double.IsInfinity(fps))
+                {
+                    _playbackTimer.Interval = TimeSpan.FromSeconds(1.0 / fps);
+                }
+            }
+
             _isInitialized = true;
             RenderCurrentFrame();
         }
@@ -116,6 +151,12 @@ namespace ui
         private void MainPage_Unloaded(object sender, RoutedEventArgs e)
         {
             FreeRustFFI();
+            if (_mediaWatcher != null)
+            {
+                _mediaWatcher.EnableRaisingEvents = false;
+                _mediaWatcher.Dispose();
+                _mediaWatcher = null;
+            }
             if (_presenter != IntPtr.Zero)
             {
                 NativeMethods.presenter_destroy(_presenter);
@@ -131,18 +172,113 @@ namespace ui
 
         private void InitializeMediaBrowser()
         {
-            var items = new List<MediaItem>
+            // Do not bind hardcoded ItemsSource so we can use Items.Add manually.
+        }
+
+        public record MediaEntry(string Id, string Name, string Path);
+
+        private void SetupMediaWatcher()
+        {
+            try
             {
-                new() { Name = "opening_shot.mp4", Duration = "00:00:05.00 (150 frames)", Icon = "\uE714" },
-                new() { Name = "interview_audio.wav", Duration = "00:00:15.00 (450 frames)", Icon = "\uE712" },
-                new() { Name = "b-roll_city.mp4", Duration = "00:00:10.00 (300 frames)", Icon = "\uE714" },
-                new() { Name = "subtitle_english.txt", Duration = "00:00:03.00 (90 frames)", Icon = "\uE8A5" }
-            };
-            MediaListView.ItemsSource = items;
+                _mediaWatcher = new System.IO.FileSystemWatcher(".", "media.json")
+                {
+                    NotifyFilter = System.IO.NotifyFilters.LastWrite | System.IO.NotifyFilters.Size | System.IO.NotifyFilters.FileName
+                };
+                System.IO.FileSystemEventHandler handler = (s, e) =>
+                {
+                    Console.WriteLine($"[MediaWatcher] Event '{e.ChangeType}' detected on {e.Name}. Queuing refresh...");
+                    this.DispatcherQueue.TryEnqueue(() => {
+                        RefreshMediaBrowser();
+                    });
+                };
+                _mediaWatcher.Changed += handler;
+                _mediaWatcher.Created += handler;
+                _mediaWatcher.Deleted += handler;
+                _mediaWatcher.Renamed += (s, e) => {
+                    Console.WriteLine($"[MediaWatcher] Event 'Renamed' detected. Queuing refresh...");
+                    this.DispatcherQueue.TryEnqueue(() => {
+                        RefreshMediaBrowser();
+                    });
+                };
+                _mediaWatcher.EnableRaisingEvents = true;
+                Console.WriteLine("[Init] FileSystemWatcher for media.json initialized.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Init] Failed to setup media watcher: {ex.Message}");
+            }
+        }
+
+        private void RefreshMediaBrowser()
+        {
+            if (_timelinePtr == IntPtr.Zero)
+            {
+                Console.WriteLine("[MediaBrowser] Cannot refresh: _timelinePtr is null.");
+                return;
+            }
+
+            IntPtr jsonPtr = NativeMethods.media_get_all_json(_timelinePtr);
+            if (jsonPtr != IntPtr.Zero)
+            {
+                try
+                {
+                    string json = Marshal.PtrToStringAnsi(jsonPtr) ?? "[]";
+                    var mediaEntries = JsonSerializer.Deserialize<List<MediaEntry>>(json);
+                    if (mediaEntries != null)
+                    {
+                        MediaListView.Items.Clear();
+                        foreach (var entry in mediaEntries)
+                        {
+                            MediaListView.Items.Add(new MediaItem
+                            {
+                                Name = entry.Name,
+                                Icon = "🎬",
+                                Duration = ""
+                            });
+                        }
+                        Console.WriteLine($"[MediaBrowser] Refreshed {mediaEntries.Count} items.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[MediaBrowser] Error refreshing: {ex.Message}");
+                }
+                finally
+                {
+                    NativeMethods.palmier_free_string(jsonPtr);
+                }
+            }
+            else
+            {
+                Console.WriteLine("[MediaBrowser] media_get_all_json returned null.");
+            }
         }
 
         private void InitializeMockTimeline()
         {
+            if (System.IO.File.Exists("timeline.json"))
+            {
+                try
+                {
+                    string json = System.IO.File.ReadAllText("timeline.json");
+                    var loadedTimeline = JsonSerializer.Deserialize<Timeline>(json);
+                    if (loadedTimeline != null)
+                    {
+                        _timeline = loadedTimeline;
+                        TimelineEditor.TimelineData = _timeline;
+                        System.Diagnostics.Debug.WriteLine("[Init] Loaded timeline from timeline.json");
+                        Console.WriteLine("[Init] Loaded timeline from timeline.json");
+                        return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[Init] Error loading timeline.json: {ex.Message}");
+                    Console.WriteLine($"[Init] Error loading timeline.json: {ex.Message}");
+                }
+            }
+
             _timeline = new Timeline
             {
                 width = 1920,
@@ -225,6 +361,8 @@ namespace ui
 
                 if (_timelinePtr != IntPtr.Zero)
                 {
+                    // Register a fresh undo stack for this timeline instance.
+                    NativeMethods.timeline_undo_stack_init(_timelinePtr);
                     FFIStatusText.Text = $"Rust FFI: Active (ptr: 0x{_timelinePtr.ToInt64():X})";
                     FFIStatusText.Foreground = new SolidColorBrush(Microsoft.UI.Colors.Green);
                 }
@@ -250,6 +388,7 @@ namespace ui
         {
             if (_timelinePtr != IntPtr.Zero)
             {
+                NativeMethods.timeline_undo_stack_free(_timelinePtr);
                 NativeMethods.timeline_free(_timelinePtr);
                 _timelinePtr = IntPtr.Zero;
             }
@@ -268,11 +407,20 @@ namespace ui
                         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
                     });
 
-                    // Free old FFI timeline instance and allocate new one representing the mutated state
-                    NativeMethods.timeline_free(_timelinePtr);
-                    _timelinePtr = NativeMethods.timeline_from_json(json, (nuint)System.Text.Encoding.UTF8.GetByteCount(json));
+                    // Save mutated state to timeline.json
+                    try
+                    {
+                        System.IO.File.WriteAllText("timeline.json", json);
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[Sync] Failed to write timeline.json: {ex.Message}");
+                    }
 
-                    if (_timelinePtr != IntPtr.Zero)
+                    // Update the Rust-side timeline in-place. This diffs and pushes the operation to the Rust undo stack.
+                    bool success = NativeMethods.timeline_update_from_json(_timelinePtr, json, (nuint)System.Text.Encoding.UTF8.GetByteCount(json));
+
+                    if (success)
                     {
                         FFIStatusText.Text = $"Rust FFI: Active (Clip moved, ptr: 0x{_timelinePtr.ToInt64():X})";
                         FFIStatusText.Foreground = new SolidColorBrush(Microsoft.UI.Colors.Green);
@@ -331,12 +479,39 @@ namespace ui
 
         private void PlaybackTimer_Tick(object sender, object e)
         {
+            Console.WriteLine($"[Tick] Tick event triggered. _isInitialized={_isInitialized}, _engine={_engine.ToInt64():X}, _presenter={_presenter.ToInt64():X}");
             if (!_isInitialized || _engine == IntPtr.Zero || _presenter == IntPtr.Zero) return;
-
+  
             try
             {
-                TimelineEditor.SetPlayheadFrame(TimelineEditor.PlayheadFrame + 1);
+                long totalFrames = 1000; // fallback default
+                if (_timelinePtr != IntPtr.Zero)
+                {
+                    totalFrames = NativeMethods.timeline_total_frames(_timelinePtr);
+                }
+                Console.WriteLine($"[Tick] totalFrames={totalFrames}, currentPlayheadFrame={TimelineEditor.PlayheadFrame}");
+  
+                long currentFrame = TimelineEditor.PlayheadFrame;
+                if (currentFrame >= totalFrames)
+                {
+                    Console.WriteLine($"[Tick] currentFrame ({currentFrame}) >= totalFrames ({totalFrames}). Stopping playback.");
+                    _playbackTimer.Stop();
+                    currentFrame = 0;
+                    TimelineEditor.SetPlayheadFrame(0);
+                    try { PlayButton.Content = "\uE768"; } catch {} // Play Icon
+                }
+                else
+                {
+                    currentFrame += 1;
+                    TimelineEditor.SetPlayheadFrame(currentFrame);
+                    Console.WriteLine($"[Tick] Incremented playhead to frame {currentFrame}");
+                }
+  
                 RenderCurrentFrame();
+  
+                // Sync the UI state
+                TimelineViewModel.CurrentFrame = (int)currentFrame;
+                TimelineViewModel.TotalFrames = (int)totalFrames;
             }
             catch (Exception ex)
             {
@@ -349,6 +524,7 @@ namespace ui
         private void OnPlayClick(object sender, RoutedEventArgs e)
         {
             var btn = (Button)sender;
+            Console.WriteLine($"[PlayClick] Button clicked. _playbackTimer.IsEnabled={_playbackTimer.IsEnabled}, Interval={_playbackTimer.Interval.TotalMilliseconds}ms");
             if (_playbackTimer.IsEnabled)
             {
                 _playbackTimer.Stop();
@@ -359,6 +535,7 @@ namespace ui
                 _playbackTimer.Start();
                 btn.Content = "\uE769"; // Pause Icon
             }
+            Console.WriteLine($"[PlayClick] After action: _playbackTimer.IsEnabled={_playbackTimer.IsEnabled}");
         }
 
         private void OnPrevFrameClick(object sender, RoutedEventArgs e)
@@ -383,16 +560,77 @@ namespace ui
             }
         }
 
+        /// Reload timeline from a JSON string and sync the UI.
+        private void RefreshTimelineUIFromJson(string jsonStr)
+        {
+            try
+            {
+                var reloaded = JsonSerializer.Deserialize<Timeline>(jsonStr);
+                if (reloaded == null) return;
+                _timeline = reloaded;
+                TimelineEditor.TimelineData = _timeline;
+
+                // Rebuild the Rust-side timeline pointer from the restored JSON.
+                if (_timelinePtr != IntPtr.Zero)
+                {
+                    NativeMethods.timeline_undo_stack_free(_timelinePtr);
+                    NativeMethods.timeline_free(_timelinePtr);
+                }
+                _timelinePtr = NativeMethods.timeline_from_json(jsonStr,
+                    (nuint)System.Text.Encoding.UTF8.GetByteCount(jsonStr));
+                if (_timelinePtr != IntPtr.Zero)
+                    NativeMethods.timeline_undo_stack_init(_timelinePtr);
+
+                // Persist to disk.
+                System.IO.File.WriteAllText("timeline.json", jsonStr);
+
+                RenderCurrentFrame();
+                System.Diagnostics.Debug.WriteLine("[Undo/Redo] Timeline UI refreshed.");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[Undo/Redo] Refresh error: {ex.Message}");
+            }
+        }
+
+        /// Reload timeline.json written by Rust after an undo/redo and sync the UI.
+        private void RefreshTimelineUI()
+        {
+            try
+            {
+                string json = System.IO.File.ReadAllText("timeline.json");
+                RefreshTimelineUIFromJson(json);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[Undo/Redo] RefreshTimelineUI error: {ex.Message}");
+            }
+        }
+
         private void OnUndoClick(object sender, RoutedEventArgs e)
         {
-            // Transaction-based Undo trigger mock
-            System.Diagnostics.Debug.WriteLine("Undo transaction triggered");
+            if (_timelinePtr == IntPtr.Zero) return;
+
+            if (NativeMethods.timeline_undo(_timelinePtr))
+            {
+                RefreshTimelineUI();
+            }
         }
 
         private void OnRedoClick(object sender, RoutedEventArgs e)
         {
-            // Transaction-based Redo trigger mock
-            System.Diagnostics.Debug.WriteLine("Redo transaction triggered");
+            if (_timelinePtr == IntPtr.Zero) return;
+
+            if (NativeMethods.timeline_redo(_timelinePtr))
+            {
+                RefreshTimelineUI();
+            }
         }
+    }
+ 
+    public static class TimelineViewModel
+    {
+        public static int CurrentFrame { get; set; }
+        public static int TotalFrames { get; set; }
     }
 }
