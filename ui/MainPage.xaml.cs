@@ -310,7 +310,7 @@ namespace ui
             try
             {
                 long frame = TimelineEditor.PlayheadFrame;
-                nint output = NativeMethods.render_frame(_engine, frame);
+                nint output = NativeMethods.render_frame(_engine, _timelinePtr, frame);
                 if (output != IntPtr.Zero)
                 {
                     NativeMethods.presenter_present(_presenter, output);
