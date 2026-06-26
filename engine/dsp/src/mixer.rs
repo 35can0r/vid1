@@ -48,7 +48,8 @@ unsafe extern "C" {
     fn timeline_get_active_clips(
         handle: *const EngineHandle,
         frame_number: i64,
-        out_clips: *mut *mut ActiveClipC,
+        out_clips: *mut ActiveClipC,
+        max_clips: i32,
     ) -> i32;
 
     fn active_clips_free(ptr: *mut ActiveClipC, count: i32);
@@ -199,12 +200,17 @@ pub fn run_mixer_thread(
     producer: Arc<Mutex<HeapProducer>>,
     sample_position: Arc<AtomicI64>,
     is_playing: Arc<AtomicBool>,
+    is_shutting_down: Arc<AtomicBool>,
     sample_rate: u32,
     fps: f64,
 ) {
     let lookahead_samples = sample_rate as usize / 5; // 200ms
 
     loop {
+        if is_shutting_down.load(Ordering::Relaxed) {
+            break;
+        }
+
         if !is_playing.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(10));
             continue;
@@ -223,17 +229,17 @@ pub fn run_mixer_thread(
             / sample_rate as f64
             * fps) as i64;
 
-        let mut clips_ptr: *mut ActiveClipC = std::ptr::null_mut();
+        let mut clips: [ActiveClipC; 16] = unsafe { std::mem::zeroed() };
 
         let count = unsafe {
-            timeline_get_active_clips(timeline, lookahead_frame, &mut clips_ptr)
+            timeline_get_active_clips(timeline, lookahead_frame, clips.as_mut_ptr(), 16)
         };
 
         let chunk_frames = (sample_rate as f64 * 0.02) as usize; // 20ms chunks
         let mut mixed = vec![0.0f32; chunk_frames * 2]; // stereo
 
-        if count > 0 && !clips_ptr.is_null() {
-            let clips_slice = unsafe { std::slice::from_raw_parts(clips_ptr, count as usize) };
+        for i in 0..count as usize {
+            let clip = &clips[i];
 
             for clip in clips_slice {
                 // FIX 1: Only process audio tracks (track_kind == 1)
@@ -251,15 +257,10 @@ pub fn run_mixer_thread(
                     )
                 };
 
-                for (i, s) in pcm.iter().enumerate() {
-                    if i < mixed.len() {
-                        mixed[i] += s * clip.opacity;
-                    }
+            for (j, s) in pcm.iter().enumerate() {
+                if j < mixed.len() {
+                    mixed[j] += s * clip.opacity;
                 }
-            }
-
-            unsafe {
-                active_clips_free(clips_ptr, count);
             }
         }
 
