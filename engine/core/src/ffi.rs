@@ -31,6 +31,7 @@ pub struct ActiveClipC {
     pub media_ref: [u8; 37],
     pub source_frame: i64,
     pub track_index: u32,
+    pub track_kind: u32, // 0 = Video, 1 = Audio
     pub center_x: f32,
     pub center_y: f32,
     pub width: f32,
@@ -68,6 +69,11 @@ pub extern "C" fn timeline_get_active_clips(
         if track.muted || track.hidden {
             continue;
         }
+        // Determine kind: 0 = Video, 1 = Audio
+        let track_kind_val = match track.track_type {
+            crate::timeline::ClipType::Audio => 1u32,
+            _ => 0u32,
+        };
 
         let track_kind = match track.track_type {
             crate::timeline::ClipType::Audio => 1,
@@ -92,6 +98,7 @@ pub extern "C" fn timeline_get_active_clips(
                     media_ref: [0; 37],
                     source_frame,
                     track_index: track_idx as u32,
+                    track_kind: track_kind_val,
                     center_x: 0.5,
                     center_y: 0.5,
                     width: 1.0,
