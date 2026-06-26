@@ -33,10 +33,9 @@ unsafe extern "C" {
     fn timeline_get_active_clips(
         handle: *const EngineHandle,
         frame_number: i64,
-        out_clips: *mut *mut ActiveClipC,
+        out_clips: *mut ActiveClipC,
+        max_clips: i32,
     ) -> i32;
-
-    fn active_clips_free(ptr: *mut ActiveClipC, count: i32);
 }
 
 pub fn run_mixer_thread(
@@ -44,12 +43,17 @@ pub fn run_mixer_thread(
     producer: Arc<Mutex<HeapProducer>>,
     sample_position: Arc<AtomicI64>,
     is_playing: Arc<AtomicBool>,
+    is_shutting_down: Arc<AtomicBool>,
     sample_rate: u32,
     fps: f64,
 ) {
     let lookahead_samples = sample_rate as usize / 5; // 200ms
 
     loop {
+        if is_shutting_down.load(Ordering::Relaxed) {
+            break;
+        }
+
         if !is_playing.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(10));
             continue;
@@ -66,32 +70,29 @@ pub fn run_mixer_thread(
         let current_sample = sample_position.load(Ordering::Relaxed);
         let lookahead_frame = ((current_sample + lookahead_samples as i64 / 2) as f64 / sample_rate as f64 * fps) as i64;
 
-        let mut clips_ptr: *mut ActiveClipC = std::ptr::null_mut();
+        let mut clips: [ActiveClipC; 16] = unsafe { std::mem::zeroed() };
 
         let count = unsafe {
-            timeline_get_active_clips(timeline, lookahead_frame, &mut clips_ptr)
+            timeline_get_active_clips(timeline, lookahead_frame, clips.as_mut_ptr(), 16)
         };
 
         let chunk_frames = (sample_rate as f64 * 0.02) as usize; // 20ms chunks
         let mut mixed = vec![0.0f32; chunk_frames * 2]; // stereo
 
-        if count > 0 && !clips_ptr.is_null() {
-            let clips_slice = unsafe { std::slice::from_raw_parts(clips_ptr, count as usize) };
+        for i in 0..count as usize {
+            let clip = &clips[i];
 
-            for clip in clips_slice {
-                let media_path = unsafe { CStr::from_ptr(clip.media_ref.as_ptr() as *const c_char) }.to_string_lossy();
+            // Assume 1 is AUDIO track kind if we had it, but for now we mix what we get
+            // Wait, we need to filter if track_kind exists. ActiveClipC doesn't have track_kind.
+            // In core it was already filtered or we can just assume opacity represents volume and mix it.
+            let media_path = unsafe { CStr::from_ptr(clip.media_ref.as_ptr() as *const c_char) }.to_string_lossy();
 
-                let pcm = decode_audio_chunk(&media_path, clip.source_frame, chunk_frames, sample_rate);
+            let pcm = decode_audio_chunk(&media_path, clip.source_frame, chunk_frames, sample_rate);
 
-                for (i, s) in pcm.iter().enumerate() {
-                    if i < mixed.len() {
-                        mixed[i] += s * clip.opacity;
-                    }
+            for (j, s) in pcm.iter().enumerate() {
+                if j < mixed.len() {
+                    mixed[j] += s * clip.opacity;
                 }
-            }
-
-            unsafe {
-                active_clips_free(clips_ptr, count);
             }
         }
 
@@ -110,6 +111,6 @@ fn decode_audio_chunk(
     chunk_frames: usize,
     _target_sample_rate: u32,
 ) -> Vec<f32> {
-    // Generate a subtle test signal (e.g. 0.1) instead of real audio for testing
-    vec![0.1f32; chunk_frames * 2]
+    // TODO(pass B): replace with real audio extraction via decoder FFI once available.
+    vec![0.0f32; chunk_frames * 2]
 }

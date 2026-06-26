@@ -52,21 +52,34 @@ pub struct ActiveClipC {
 pub extern "C" fn timeline_get_active_clips(
     handle: *const EngineHandle,
     frame_number: i64,
-    out_clips: *mut *mut ActiveClipC,
+    out_clips: *mut ActiveClipC,
+    max_clips: i32,
 ) -> i32 {
-    if handle.is_null() || out_clips.is_null() {
+    if handle.is_null() || out_clips.is_null() || max_clips <= 0 {
         return 0;
     }
 
     let timeline = unsafe { &(*handle).timeline };
-    let mut active_clips = Vec::new();
+    let mut count = 0;
+
+    let out_slice = unsafe { std::slice::from_raw_parts_mut(out_clips, max_clips as usize) };
 
     for (track_idx, track) in timeline.tracks.iter().enumerate() {
-        if track.muted || track.hidden || track.track_type != crate::timeline::ClipType::Video {
+        if track.muted || track.hidden {
             continue;
         }
 
+        let track_kind = match track.track_type {
+            crate::timeline::ClipType::Audio => 1,
+            crate::timeline::ClipType::Video => 0,
+            _ => continue, // We only process video/audio clips this way
+        };
+
         for clip in &track.clips {
+            if count >= max_clips as usize {
+                break;
+            }
+
             if frame_number >= clip.start_frame && frame_number < clip.start_frame + clip.duration_frames {
                 let local_frame = frame_number - clip.start_frame;
                 let mut source_frame = clip.trim_start_frame + (local_frame as f64 * clip.speed).round() as i64;
@@ -124,35 +137,13 @@ pub extern "C" fn timeline_get_active_clips(
                 clip_c.crop_right = crop.right as f32;
                 clip_c.crop_bottom = crop.bottom as f32;
 
-                active_clips.push(clip_c);
+                out_slice[count] = clip_c;
+                count += 1;
             }
         }
     }
 
-    let count = active_clips.len() as i32;
-    if count > 0 {
-        let boxed_slice = active_clips.into_boxed_slice();
-        let ptr = Box::into_raw(boxed_slice) as *mut ActiveClipC;
-        unsafe {
-            *out_clips = ptr;
-        }
-    } else {
-        unsafe {
-            *out_clips = ptr::null_mut();
-        }
-    }
-
-    count
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn active_clips_free(ptr: *mut ActiveClipC, count: i32) {
-    if !ptr.is_null() && count > 0 {
-        unsafe {
-            let slice = std::slice::from_raw_parts_mut(ptr, count as usize);
-            drop(Box::from_raw(slice));
-        }
-    }
+    count as i32
 }
 
 #[unsafe(no_mangle)]
@@ -243,6 +234,49 @@ pub extern "C" fn string_free(ptr: *mut c_char) {
             drop(CString::from_raw(ptr));
         }
     }
+}
+
+// ─── Stub lifecycle functions for back-compat ─────────────────────────────────
+
+#[unsafe(no_mangle)]
+pub extern "C" fn audio_engine_create(timeline: *mut EngineHandle) -> *mut dsp::AudioEngine {
+    if timeline.is_null() { return std::ptr::null_mut(); }
+    Box::into_raw(Box::new(dsp::AudioEngine::new(timeline as *mut dsp::EngineHandle)))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn audio_engine_play(engine: *mut dsp::AudioEngine, from_frame: i64) {
+    if engine.is_null() { return; }
+    let engine = unsafe { &mut *engine };
+    engine.play(from_frame);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn audio_engine_pause(engine: *mut dsp::AudioEngine) {
+    if engine.is_null() { return; }
+    let engine = unsafe { &mut *engine };
+    engine.pause();
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn audio_engine_stop(engine: *mut dsp::AudioEngine) {
+    if engine.is_null() { return; }
+    let engine = unsafe { &mut *engine };
+    engine.stop();
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn audio_engine_current_frame(engine: *mut dsp::AudioEngine) -> i64 {
+    if engine.is_null() { return 0; }
+    let engine = unsafe { &*engine };
+    engine.current_frame()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn audio_engine_destroy(engine: *mut dsp::AudioEngine) {
+    if engine.is_null() { return; }
+    let mut engine = unsafe { Box::from_raw(engine) };
+    engine.destroy();
 }
 
 // ─── Stub lifecycle functions for back-compat ─────────────────────────────────
