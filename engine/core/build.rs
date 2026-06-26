@@ -110,6 +110,11 @@ fn main() {
     println!("cargo:rustc-cdylib-link-arg=/EXPORT:timeline_checkpoint");
     println!("cargo:rustc-cdylib-link-arg=/EXPORT:timeline_undo");
     println!("cargo:rustc-cdylib-link-arg=/EXPORT:timeline_redo");
+    // Decoder – C++ ABI, needed by dsp mixer for audio frames.
+    println!("cargo:rustc-cdylib-link-arg=/EXPORT:decoder_open");
+    println!("cargo:rustc-cdylib-link-arg=/EXPORT:decoder_get_audio_info");
+    println!("cargo:rustc-cdylib-link-arg=/EXPORT:decoder_decode_audio_frame");
+    println!("cargo:rustc-cdylib-link-arg=/EXPORT:decoder_close");
 
     // Copy DirectML.dll and FFmpeg DLLs to the target output directory
     let target_dir = out_dir
