@@ -1,6 +1,6 @@
-# Palmier Video Editor
+# Video Editor
 
-Palmier is a modern, high-performance, non-linear video editor utilizing a specialized cross-language architecture to combine UI flexibility with native performance:
+this is a modern, high-performance, non-linear video editor utilizing a specialized cross-language architecture to combine UI flexibility with native performance:
 
 * **Frontend**: C# / WinUI 3 (Desktop UI and timeline controls)
 * **Core & Audio**: Rust (Timeline structures, Undo/Redo stack, CPAL audio mixing)
