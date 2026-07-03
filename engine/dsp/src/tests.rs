@@ -92,4 +92,19 @@ mod tests {
         // The playhead might not have advanced perfectly since we are testing CI, but check if we didn't crash.
         assert!(frame >= 0);
     }
+
+    #[test]
+    fn test_print_cpal_device() {
+        use cpal::traits::HostTrait;
+        let host = cpal::default_host();
+        if let Some(device) = host.default_output_device() {
+            if let Ok(name) = cpal::traits::DeviceTrait::name(&device) {
+                println!("DEFAULT CPAL OUTPUT DEVICE: {}", name);
+            } else {
+                println!("FAILED TO GET CPAL DEVICE NAME");
+            }
+        } else {
+            println!("NO DEFAULT CPAL OUTPUT DEVICE FOUND");
+        }
+    }
 }

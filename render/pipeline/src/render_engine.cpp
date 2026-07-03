@@ -5,18 +5,28 @@
 #include "../include/compositor.h"
 #include "video_decoder.h"
 #include <iostream>
+#include <fstream>
 #include <unordered_map>
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <stddef.h>
 
 using Microsoft::WRL::ComPtr;
+
+static void LogDebug(const std::string& msg) {
+    std::ofstream log("palmier_engine.log", std::ios_base::app);
+    if (log.is_open()) {
+        log << msg << std::endl;
+    }
+}
 
 struct ActiveClipC {
     uint8_t clip_id[37];
     uint8_t media_ref[37];
     int64_t source_frame;
     uint32_t track_index;
+    uint32_t track_kind;
     float center_x;
     float center_y;
     float width;
@@ -47,6 +57,10 @@ struct RendererHandle {
 
 extern "C" {
     RendererHandle* renderer_create(uint32_t canvas_width, uint32_t canvas_height) {
+        LogDebug("[ALIGNMENT] sizeof(ActiveClipC) = " + std::to_string(sizeof(ActiveClipC)));
+        LogDebug("[ALIGNMENT] offsetof(track_kind) = " + std::to_string(offsetof(ActiveClipC, track_kind)));
+        LogDebug("[ALIGNMENT] offsetof(opacity) = " + std::to_string(offsetof(ActiveClipC, opacity)));
+
         auto* r = new RendererHandle();
         r->width = canvas_width;
         r->height = canvas_height;
@@ -117,24 +131,27 @@ extern "C" {
         TextureHandle* output_texture = r->pool->get_resource(slot);
 
         CompositeResult result = {};
-
-        ActiveClipC* active_clips = nullptr;
+ 
+        ActiveClipC active_clips[16] = {};
         int32_t count = 0;
-
+ 
         if (timeline) {
-            count = timeline_get_active_clips(timeline, frame_number, &active_clips);
+            count = timeline_get_active_clips(timeline, frame_number, active_clips, 16);
         }
-
-        if (count > 0 && active_clips) {
+ 
+        LogDebug("[RENDER] active clip count: " + std::to_string(count));
+        LogDebug("[RENDER] frame_number: " + std::to_string(frame_number));
+ 
+        if (count > 0) {
             std::vector<LayerDesc> layers;
             std::vector<int> acquired_slots;
-
+ 
             for (int32_t i = 0; i < count; ++i) {
-                ActiveClipC* clip = active_clips + i;
-
+                ActiveClipC* clip = &active_clips[i];
+ 
                 std::string media_ref_str((char*)clip->media_ref);
                 DecoderHandle* dec = nullptr;
-
+ 
                 auto it = r->decoder_cache.find(media_ref_str);
                 if (it != r->decoder_cache.end()) {
                     dec = it->second;
@@ -151,7 +168,7 @@ extern "C" {
                         string_free(resolved_path);
                     }
                 }
-
+ 
                 if (dec) {
                     int layer_slot = r->pool->acquire();
                     if (layer_slot >= 0) {
@@ -159,13 +176,13 @@ extern "C" {
                         decoder_seek(dec, clip->source_frame);
                         decoder_decode_frame(dec, layer_texture);
                         acquired_slots.push_back(layer_slot);
-
+ 
                         MediaInfo info = decoder_get_info(dec);
                         uint32_t pool_w = r->pool->GetWidth();
                         uint32_t pool_h = r->pool->GetHeight();
                         float scale_x = (float)info.width / pool_w;
                         float scale_y = (float)info.height / pool_h;
-
+ 
                         LayerDesc layer = {};
                         layer.texture = layer_texture;
                         layer.opacity = clip->opacity;
@@ -174,29 +191,27 @@ extern "C" {
                         layer.transform.width = clip->width;
                         layer.transform.height = clip->height;
                         layer.transform.rotation = clip->rotation;
-
+ 
                         layer.crop.left = clip->crop_left * scale_x;
                         layer.crop.top = clip->crop_top * scale_y;
                         layer.crop.right = 1.0f - (1.0f - clip->crop_right) * scale_x;
                         layer.crop.bottom = 1.0f - (1.0f - clip->crop_bottom) * scale_y;
                         layer.grade = { clip->exposure, clip->contrast, clip->temperature, clip->tint, clip->saturation, {0,0,0} };
-
+ 
                         layers.push_back(layer);
                     }
                 }
             }
-
+ 
             compositor_composite(r->compositor, layers.data(), layers.size(), output_texture);
-
+ 
             for (int s : acquired_slots) {
                 r->pool->release(s);
             }
-
-            active_clips_free(active_clips, count);
         } else {
             compositor_composite(r->compositor, nullptr, 0, output_texture);
         }
-
+ 
         return output_texture;
     }
 }

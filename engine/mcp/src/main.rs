@@ -4,7 +4,7 @@ use axum::{
     Json,
     Router,
 };
-use core_crate::timeline::{Timeline, Clip, ClipContent, TextGroupItem};
+use core_crate::timeline::{Timeline, Clip, ClipContent, TextGroupItem, Transform, Crop};
 use undo::UndoRedoStack;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -445,6 +445,28 @@ async fn handle_rpc_call(
                             },
                             "required": ["source_path"]
                         }
+                    },
+                    {
+                        "name": "add_clips",
+                        "description": "Add one or more clips to the timeline.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "clips": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "mediaRef": { "type": "string" },
+                                            "startFrame": { "type": "integer" },
+                                            "durationFrames": { "type": "integer" }
+                                        },
+                                        "required": ["mediaRef", "startFrame", "durationFrames"]
+                                    }
+                                }
+                            },
+                            "required": ["clips"]
+                        }
                     }
                 ]
             });
@@ -565,6 +587,129 @@ async fn handle_rpc_call(
                 Err(e) => make_error_response(-32000, e, None, id),
             }
         }
+        "add_clips" => {
+            #[derive(Deserialize)]
+            struct AddClipItem {
+                #[serde(rename = "mediaRef")]
+                media_ref: String,
+                #[serde(rename = "startFrame")]
+                start_frame: i64,
+                #[serde(rename = "durationFrames")]
+                duration_frames: i64,
+            }
+            #[derive(Deserialize)]
+            struct AddClipsArgs {
+                clips: Vec<AddClipItem>,
+            }
+
+            let args: AddClipsArgs = match serde_json::from_value(method_args) {
+                Ok(a) => a,
+                Err(e) => return make_error_response(-32602, format!("Invalid arguments: {}", e), None, id),
+            };
+
+            let mut timeline = state.timeline.lock().unwrap();
+            let mut stack = state.undo_stack.lock().unwrap();
+
+            // Resolve file extensions from media.json if it exists
+            let media_manifest: serde_json::Value = if std::path::Path::new("media.json").exists() {
+                let content = std::fs::read_to_string("media.json").unwrap_or_default();
+                serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}))
+            } else {
+                serde_json::json!({})
+            };
+
+            stack.begin_transaction("Add Clips");
+            let mut success = true;
+            let mut err_msg = String::new();
+
+            for item in &args.clips {
+                // Determine file type
+                let file_name = media_manifest.get(&item.media_ref)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let ext = std::path::Path::new(file_name)
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("mp4")
+                    .to_lowercase();
+
+                let is_audio = ["mp3", "wav", "aac", "m4a", "ogg", "flac"].contains(&ext.as_str());
+                let target_type = if is_audio {
+                    core_crate::timeline::ClipType::Audio
+                } else {
+                    core_crate::timeline::ClipType::Video
+                };
+
+                // Find track of matching type
+                let track_id = if let Some(track) = timeline.tracks.iter().find(|t| t.track_type == target_type) {
+                    track.id
+                } else {
+                    let new_track = core_crate::timeline::Track {
+                        id: Uuid::new_v4(),
+                        track_type: target_type,
+                        muted: false,
+                        hidden: false,
+                        sync_locked: false,
+                        clips: vec![],
+                    };
+                    let tid = new_track.id;
+                    timeline.tracks.push(new_track);
+                    tid
+                };
+
+                let content = if is_audio {
+                    ClipContent::Audio {
+                        volume: 1.0,
+                        volume_track: None,
+                    }
+                } else {
+                    ClipContent::Video {
+                        transform: Transform::default(),
+                        crop: Crop::default(),
+                        opacity: 1.0,
+                        transform_track: None,
+                        crop_track: None,
+                        opacity_track: None,
+                    }
+                };
+
+                let clip = Clip {
+                    id: Uuid::new_v4(),
+                    media_ref: item.media_ref.clone(),
+                    start_frame: item.start_frame,
+                    duration_frames: item.duration_frames,
+                    trim_start_frame: 0,
+                    speed: 1.0,
+                    content,
+                    link_group_id: None,
+                };
+
+                let op = undo::Operation::InsertClip { track_id, clip };
+                if let Err(e) = undo::apply_operation(&mut timeline, &op) {
+                    success = false;
+                    err_msg = e;
+                    break;
+                } else {
+                    stack.record_operation(op);
+                }
+            }
+
+            if success {
+                stack.commit_transaction();
+                if let Ok(json_str) = serde_json::to_string_pretty(&*timeline) {
+                    let _ = std::fs::write("timeline.json", json_str);
+                }
+                JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    result: Some(serde_json::json!({ "status": "success" })),
+                    error: None,
+                    id,
+                }
+            } else {
+                stack.rollback_transaction();
+                make_error_response(-32000, format!("Execution failed: {}", err_msg), None, id)
+            }
+        }
         _ => make_error_response(-32601, format!("Method not found: {}", method_name), None, id),
     }
 }
@@ -573,6 +718,14 @@ async fn handle_post(
     State(state): State<Arc<ServerState>>,
     Json(payload): Json<JsonRpcRequest>,
 ) -> Json<JsonRpcResponse> {
+    // Reload timeline.json if it exists to stay synchronized with C# drag & drop / editing changes
+    if let Ok(content) = std::fs::read_to_string("timeline.json") {
+        if let Ok(timeline) = serde_json::from_str::<Timeline>(&content) {
+            let mut state_timeline = state.timeline.lock().unwrap();
+            *state_timeline = timeline;
+        }
+    }
+
     let resp = handle_rpc_call(state, payload).await;
     Json(resp)
 }

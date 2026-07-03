@@ -66,6 +66,7 @@ impl AudioEngine {
         if config.channels > 2 {
             config.channels = 2;
         }
+        eprintln!("[AudioEngine] Selected CPAL config: sample_rate = {}, channels = {}", config.sample_rate.0, config.channels);
         let sample_rate = config.sample_rate.0;
 
         let rb = HeapRb::new(sample_rate as usize * 2); // 1 second stereo buffer
@@ -124,6 +125,7 @@ impl AudioEngine {
     }
 
     pub fn play(&mut self, from_frame: i64) {
+        eprintln!("[AudioEngine] play() called from_frame: {}", from_frame);
         self.target_frame.store(from_frame, Ordering::Relaxed);
 
         let fps = if self.timeline_handle.is_null() {
@@ -134,10 +136,14 @@ impl AudioEngine {
 
         let sample_pos = (from_frame as f64 / fps * self.sample_rate as f64) as i64;
         self.sample_position.store(sample_pos, Ordering::Relaxed);
+        self.is_flushing.store(true, Ordering::Relaxed);
         self.is_playing.store(true, Ordering::Relaxed);
 
         if let Some(stream) = &self.stream {
-            let _ = stream.play();
+            match stream.play() {
+                Ok(_) => eprintln!("[AudioEngine] stream.play() succeeded"),
+                Err(e) => eprintln!("[AudioEngine] stream.play() failed: {:?}", e),
+            }
         }
 
         if self.mixer_handle.is_none() {

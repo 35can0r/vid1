@@ -9,7 +9,13 @@
     xmlns:toolkit="using:CommunityToolkit.WinUI.Controls"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d"
-    Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+    Background="{ThemeResource ApplicationPageBackgroundThemeBrush}"
+    KeyDown="OnPageKeyDown">
+
+    <Page.KeyboardAccelerators>
+        <KeyboardAccelerator Key="Delete" Invoked="OnDeleteAcceleratorInvoked" />
+        <KeyboardAccelerator Key="Back" Invoked="OnDeleteAcceleratorInvoked" />
+    </Page.KeyboardAccelerators>
 
     <Grid Background="#121214">
         <Grid.RowDefinitions>
@@ -30,11 +36,18 @@
             <Grid Grid.Column="0" Background="#1A1A1E" Margin="10,10,5,5" CornerRadius="8" BorderThickness="1" BorderBrush="#2D2D32">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
                 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" Text="Media Browser" FontWeight="Bold" FontSize="16" Foreground="#E1E1E6" Margin="15,15,15,10" />
                 
-                <ListView Grid.Row="1" x:Name="MediaListView" SelectionMode="None" Margin="5,0,5,10">
+                <Button Grid.Row="1" x:Name="ImportButton"
+                        Content="＋ Import Media"
+                        HorizontalAlignment="Stretch"
+                        Margin="8,8,8,4"
+                        Click="OnImportClicked" />
+                
+                <ListView Grid.Row="2" x:Name="MediaListView" SelectionMode="None" Margin="5,0,5,10" CanDragItems="True" DragItemsStarting="OnMediaItemDragStarting">
                     <ListView.ItemTemplate>
                         <DataTemplate>
                             <Grid Padding="10" Margin="5" Background="#242428" CornerRadius="6" BorderThickness="1" BorderBrush="#323238">
@@ -130,8 +143,8 @@
             </Grid>
 
             <!-- Timeline Scroll Viewport -->
-            <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" Background="#141416" Margin="10,5,10,10" CornerRadius="6">
-                <controls:TimelineCanvas x:Name="TimelineEditor" Height="300" HorizontalAlignment="Left" VerticalAlignment="Top" />
+            <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" Background="#141416" Margin="10,5,10,10" CornerRadius="6" AllowDrop="True">
+                <controls:TimelineCanvas x:Name="TimelineEditor" Height="300" HorizontalAlignment="Left" VerticalAlignment="Top" AllowDrop="True" DragOver="OnTimelineDragOver" Drop="OnTimelineDrop" />
             </ScrollViewer>
         </Grid>
     </Grid>

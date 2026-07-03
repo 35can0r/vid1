@@ -26,9 +26,12 @@ namespace PalmierPro.UI.Controls
 
         public double ZoomFactor { get; set; } = 2.0; // Pixels per frame
         public long PlayheadFrame { get; set; } = 0;
-
+        public Func<string, string?>? GetMediaNameCallback { get; set; }
+        public Guid? SelectedClipId { get; set; }
+ 
         public event Action<Clip, long>? ClipPositionChanged;
         public event Action<long>? PlayheadPositionChanged;
+        public event Action<Clip?>? ClipSelected;
 
         private const double TrackHeight = 70;
         private const double TrackSpacing = 10;
@@ -84,6 +87,13 @@ namespace PalmierPro.UI.Controls
                 long frame = (long)Math.Round(pt.Position.X / ZoomFactor);
                 SetPlayheadFrame(frame);
                 e.Handled = true;
+            }
+            else
+            {
+                // Clicked on canvas body: clear selected clip
+                SelectedClipId = null;
+                ClipSelected?.Invoke(null);
+                RebuildTimelineUI();
             }
         }
 
@@ -213,11 +223,12 @@ namespace PalmierPro.UI.Controls
                 var track = TimelineData.tracks[trackIndex];
                 foreach (var clip in track.clips)
                 {
+                    bool isSelected = clip.id == SelectedClipId;
                     var border = new Border
                     {
                         CornerRadius = new CornerRadius(6),
-                        BorderThickness = new Thickness(1),
-                        BorderBrush = new SolidColorBrush(Color.FromArgb(50, 255, 255, 255))
+                        BorderThickness = isSelected ? new Thickness(2.5) : new Thickness(1),
+                        BorderBrush = isSelected ? new SolidColorBrush(Colors.Yellow) : new SolidColorBrush(Color.FromArgb(50, 255, 255, 255))
                     };
 
                     // Alternate colors based on track type
@@ -231,7 +242,7 @@ namespace PalmierPro.UI.Controls
                     var grid = new Grid();
                     var textBlock = new TextBlock
                     {
-                        Text = clip.media_ref,
+                        Text = GetMediaNameCallback?.Invoke(clip.media_ref) ?? clip.media_ref,
                         Foreground = new SolidColorBrush(Colors.White),
                         FontSize = 11,
                         FontWeight = Microsoft.UI.Text.FontWeights.Bold,
@@ -256,6 +267,10 @@ namespace PalmierPro.UI.Controls
 
                     border.PointerPressed += (s, ev) =>
                     {
+                        SelectedClipId = clip.id;
+                        ClipSelected?.Invoke(clip);
+                        RebuildTimelineUI();
+
                         border.CapturePointer(ev.Pointer);
                         isDragging = true;
                         initialMousePosition = ev.GetCurrentPoint(this).Position;
@@ -272,10 +287,34 @@ namespace PalmierPro.UI.Controls
                             long deltaFrames = (long)Math.Round(deltaX / ZoomFactor);
                             long newStartFrame = Math.Max(0, initialStartFrame + deltaFrames);
 
-                            if (newStartFrame != clip.start_frame)
+                            double relativeY = currentMousePosition.Y - HeaderHeight - 5;
+                            int newTrackIdx = (int)Math.Round(relativeY / (TrackHeight + TrackSpacing));
+                            newTrackIdx = Math.Max(0, Math.Min(newTrackIdx, TimelineData.tracks.Count - 1));
+
+                            bool trackChanged = false;
+                            int oldTrackIdx = -1;
+
+                            for (int ti = 0; ti < TimelineData.tracks.Count; ti++)
+                            {
+                                if (TimelineData.tracks[ti].clips.Contains(clip))
+                                {
+                                    oldTrackIdx = ti;
+                                    break;
+                                }
+                            }
+
+                            if (oldTrackIdx != -1 && newTrackIdx != oldTrackIdx)
+                            {
+                                TimelineData.tracks[oldTrackIdx].clips.Remove(clip);
+                                TimelineData.tracks[newTrackIdx].clips.Add(clip);
+                                trackChanged = true;
+                            }
+
+                            if (newStartFrame != clip.start_frame || trackChanged)
                             {
                                 clip.start_frame = newStartFrame;
                                 SetLeft(border, clip.start_frame * ZoomFactor);
+                                SetTop(border, HeaderHeight + newTrackIdx * (TrackHeight + TrackSpacing) + 5);
                                 ClipPositionChanged?.Invoke(clip, clip.start_frame);
                             }
                             ev.Handled = true;

@@ -7,6 +7,14 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <fstream>
+
+static void LogDebug(const std::string& msg) {
+    std::ofstream log("palmier_engine.log", std::ios_base::app);
+    if (log.is_open()) {
+        log << msg << std::endl;
+    }
+}
 
 // D3D11 and D3D12 headers
 #include <d3d11.h>
@@ -94,6 +102,15 @@ struct DecoderHandle {
     // Ring buffer (LRU Cache)
     std::list<CachedFrame> cache_list;
     static const size_t MAX_CACHE_SIZE = 16;
+
+    // Audio decoding cache
+    AVCodecContext* audio_ctx = nullptr;
+    const AVCodec* audio_codec = nullptr;
+    int audio_stream_idx = -1;
+    int64_t current_audio_frame = -1;
+    int64_t current_audio_sample = -1;
+    AVPacket* audio_pkt = nullptr;
+    AVFrame* audio_frame = nullptr;
 };
 
 // Helper to convert 8-bit RGBA integer buffer to 32-bit float RGBA buffer on CPU
@@ -175,9 +192,9 @@ static bool init_compute_shader(DecoderHandle* h, bool use_array) {
             "    if (dispatchThreadID.x >= Width || dispatchThreadID.y >= Height)\n"
             "        return;\n"
             "\n"
-            "    int4 texCoord = int4(dispatchThreadID.x, dispatchThreadID.y, 0, 0);\n"
+            "    int4 texCoord = int4(dispatchThreadID.x, dispatchThreadID.y, ArrayIndex, 0);\n"
             "    float yVal = InputY.Load(texCoord).r;\n"
-            "    int4 uvCoord = int4(dispatchThreadID.x / 2, dispatchThreadID.y / 2, 0, 0);\n"
+            "    int4 uvCoord = int4(dispatchThreadID.x / 2, dispatchThreadID.y / 2, ArrayIndex, 0);\n"
             "    float2 uvVal = InputUV.Load(uvCoord).rg;\n"
             "\n"
             "    // Bt.709 limited range digital YUV to RGB conversion\n"
@@ -803,7 +820,7 @@ DecoderHandle* decoder_open(const char* path) {
 
     // Default configuration for multi-threaded decoding in software fallback path
     h->codec_ctx->thread_count = 0; // Auto
-    h->codec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+    h->codec_ctx->thread_type = FF_THREAD_SLICE;
 
     h->width = h->codec_ctx->width;
     h->height = h->codec_ctx->height;
@@ -884,8 +901,8 @@ ErrorCode decoder_decode_frame(DecoderHandle* h, TextureHandle* out_texture) {
         return output_frame_to_texture(h, cached_frame, out_texture);
     }
 
-    // 2. Perform seek if target_frame is non-sequential
-    if (target_frame != h->current_frame + 1) {
+    // 2. Perform seek if target_frame is behind, or too far ahead
+    if (target_frame < h->current_frame || target_frame > h->current_frame + 30) {
         AVStream* stream = h->fmt_ctx->streams[h->video_stream_idx];
         double time_in_seconds = (double)target_frame * h->fps_den / h->fps_num;
         int64_t target_pts = (int64_t)(time_in_seconds / av_q2d(stream->time_base));
@@ -963,82 +980,137 @@ int32_t decoder_decode_audio_frame(
     int32_t* out_sample_count,
     uint32_t target_sample_rate
 ) {
-    (void)target_sample_rate; // Resampling is done in Rust via rubato; we output native rate
+    (void)target_sample_rate;
 
     if (!h || !out_pcm || !out_sample_count) return -1;
     if (*out_sample_count <= 0) return -1;
 
-    // Find audio stream in the already-opened format context
-    int audio_stream_idx = av_find_best_stream(h->fmt_ctx, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
-    if (audio_stream_idx < 0) {
-        *out_sample_count = 0;
-        return -1; // No audio stream
+    // 1. Initialize audio codec context and stream info ONCE
+    if (h->audio_stream_idx < 0) {
+        h->audio_stream_idx = av_find_best_stream(h->fmt_ctx, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+        if (h->audio_stream_idx < 0) {
+            *out_sample_count = 0;
+            return -1; // No audio stream
+        }
+
+        AVStream* audio_stream = h->fmt_ctx->streams[h->audio_stream_idx];
+        h->audio_codec = avcodec_find_decoder(audio_stream->codecpar->codec_id);
+        if (!h->audio_codec) {
+            h->audio_stream_idx = -1;
+            *out_sample_count = 0;
+            return -1;
+        }
+
+        h->audio_ctx = avcodec_alloc_context3(h->audio_codec);
+        if (!h->audio_ctx) {
+            h->audio_stream_idx = -1;
+            *out_sample_count = 0;
+            return -1;
+        }
+
+        if (avcodec_parameters_to_context(h->audio_ctx, audio_stream->codecpar) < 0) {
+            avcodec_free_context(&h->audio_ctx);
+            h->audio_stream_idx = -1;
+            *out_sample_count = 0;
+            return -1;
+        }
+
+        // Set slice threading for audio context to optimize performance safely
+        h->audio_ctx->thread_count = 0; // Auto
+        h->audio_ctx->thread_type = FF_THREAD_SLICE;
+
+        if (avcodec_open2(h->audio_ctx, h->audio_codec, nullptr) < 0) {
+            avcodec_free_context(&h->audio_ctx);
+            h->audio_stream_idx = -1;
+            *out_sample_count = 0;
+            return -1;
+        }
+        h->audio_pkt = av_packet_alloc();
+        h->audio_frame = av_frame_alloc();
+        h->current_audio_frame = -1;
+        h->current_audio_sample = -1;
     }
 
-    AVStream* audio_stream = h->fmt_ctx->streams[audio_stream_idx];
-    const AVCodec* audio_codec = avcodec_find_decoder(audio_stream->codecpar->codec_id);
-    if (!audio_codec) {
-        *out_sample_count = 0;
-        return -1;
-    }
-
-    AVCodecContext* audio_ctx = avcodec_alloc_context3(audio_codec);
-    if (!audio_ctx) { *out_sample_count = 0; return -1; }
-
-    if (avcodec_parameters_to_context(audio_ctx, audio_stream->codecpar) < 0) {
-        avcodec_free_context(&audio_ctx);
-        *out_sample_count = 0;
-        return -1;
-    }
-    if (avcodec_open2(audio_ctx, audio_codec, nullptr) < 0) {
-        avcodec_free_context(&audio_ctx);
-        *out_sample_count = 0;
-        return -1;
-    }
-
-    // Seek to approximate position of source_frame
     double fps = (h->fps_num > 0 && h->fps_den > 0)
-        ? (double)h->fps_num / h->fps_den
-        : 30.0;
-    double time_in_seconds = (double)source_frame / fps;
-    int64_t seek_ts = (int64_t)(time_in_seconds * AV_TIME_BASE);
-    av_seek_frame(h->fmt_ctx, -1, seek_ts, AVSEEK_FLAG_BACKWARD);
-    avcodec_flush_buffers(audio_ctx);
+        ? (double)h->fps_num / h->fps_den : 30.0;
+    double sample_rate = h->audio_ctx->sample_rate;
+    int64_t requested_sample = (int64_t)(source_frame * sample_rate / fps);
 
-    int32_t max_pairs = *out_sample_count; // caller-provided stereo-pair capacity
+    bool need_seek = false;
+    if (h->current_audio_sample == -1) {
+        need_seek = true;
+    } else if (source_frame < h->current_audio_frame) {
+        need_seek = true;  // scrubbed backward or looped
+    } else if (source_frame > h->current_audio_frame + 60) {
+        need_seek = true;  // jumped forward more than 2 seconds
+    }
+
+    if (need_seek) {
+        double time_in_seconds = (double)source_frame / fps;
+        int64_t seek_ts = (int64_t)(time_in_seconds * AV_TIME_BASE);
+        av_seek_frame(h->fmt_ctx, -1, seek_ts, AVSEEK_FLAG_BACKWARD);
+        avcodec_flush_buffers(h->audio_ctx);
+        h->current_audio_frame = source_frame;
+        h->current_audio_sample = requested_sample;
+    } else {
+        h->current_audio_frame = source_frame;
+    }
+
+    int32_t max_pairs = *out_sample_count; // capacity in stereo pairs
     int32_t written_pairs = 0;
 
-    AVPacket* pkt = av_packet_alloc();
-    AVFrame*  frame = av_frame_alloc();
-
-    int src_channels = audio_ctx->ch_layout.nb_channels;
+    int src_channels = h->audio_ctx->ch_layout.nb_channels;
     if (src_channels < 1) src_channels = 1;
 
+    // 3. Read and decode packets
     while (written_pairs < max_pairs) {
-        int ret = av_read_frame(h->fmt_ctx, pkt);
+        int ret = av_read_frame(h->fmt_ctx, h->audio_pkt);
         if (ret < 0) break; // EOF or error
 
-        if (pkt->stream_index != audio_stream_idx) {
-            av_packet_unref(pkt);
+        if (h->audio_pkt->stream_index != h->audio_stream_idx) {
+            av_packet_unref(h->audio_pkt);
             continue;
         }
 
-        ret = avcodec_send_packet(audio_ctx, pkt);
-        av_packet_unref(pkt);
+        ret = avcodec_send_packet(h->audio_ctx, h->audio_pkt);
+        av_packet_unref(h->audio_pkt);
         if (ret < 0) continue;
 
-        while (avcodec_receive_frame(audio_ctx, frame) == 0 && written_pairs < max_pairs) {
-            int nb = frame->nb_samples;
-            AVSampleFormat fmt = (AVSampleFormat)frame->format;
+        while (avcodec_receive_frame(h->audio_ctx, h->audio_frame) == 0 && written_pairs < max_pairs) {
+            int nb = h->audio_frame->nb_samples;
+            AVSampleFormat fmt = (AVSampleFormat)h->audio_frame->format;
             bool is_planar = av_sample_fmt_is_planar(fmt) != 0;
 
-            for (int s = 0; s < nb && written_pairs < max_pairs; ++s) {
+            int64_t pts = h->audio_frame->pts;
+            if (pts == AV_NOPTS_VALUE) {
+                pts = h->audio_frame->pkt_dts;
+            }
+
+            int start_s = 0;
+            if (pts != AV_NOPTS_VALUE) {
+                int64_t frame_sample_idx = av_rescale_q(
+                    pts,
+                    h->fmt_ctx->streams[h->audio_stream_idx]->time_base,
+                    AVRational{1, h->audio_ctx->sample_rate}
+                );
+
+                if (frame_sample_idx + nb <= requested_sample) {
+                    // Entire frame is before the requested start time - discard
+                    av_frame_unref(h->audio_frame);
+                    continue;
+                }
+                if (frame_sample_idx < requested_sample) {
+                    // Requested start time lies inside this frame
+                    start_s = (int)(requested_sample - frame_sample_idx);
+                }
+            }
+
+            for (int s = start_s; s < nb && written_pairs < max_pairs; ++s) {
                 float L = 0.0f, R = 0.0f;
 
-                // Helper lambda: get sample s from channel ch as float
                 auto get_sample = [&](int ch) -> float {
                     if (ch >= src_channels) ch = src_channels - 1;
-                    uint8_t* data = is_planar ? frame->data[ch] : frame->data[0];
+                    uint8_t* data = is_planar ? h->audio_frame->data[ch] : h->audio_frame->data[0];
                     int idx = is_planar ? s : (s * src_channels + ch);
 
                     switch (fmt) {
@@ -1063,22 +1135,22 @@ int32_t decoder_decode_audio_frame(
                 };
 
                 L = get_sample(0);
-                R = (src_channels >= 2) ? get_sample(1) : L; // mono -> duplicate to both
+                R = (src_channels >= 2) ? get_sample(1) : L;
 
                 out_pcm[written_pairs * 2 + 0] = L;
                 out_pcm[written_pairs * 2 + 1] = R;
                 ++written_pairs;
             }
 
-            av_frame_unref(frame);
+            av_frame_unref(h->audio_frame);
         }
     }
 
     *out_sample_count = written_pairs;
 
-    av_frame_free(&frame);
-    av_packet_free(&pkt);
-    avcodec_free_context(&audio_ctx);
+    h->current_audio_sample += written_pairs;
+    h->current_audio_frame = (int64_t)(h->current_audio_sample * fps
+                               / h->audio_ctx->sample_rate);
 
     return (written_pairs > 0) ? 0 : -1;
 }
@@ -1135,6 +1207,16 @@ void decoder_close(DecoderHandle* h) {
     }
     if (h->pkt) {
         av_packet_free(&h->pkt);
+    }
+
+    if (h->audio_ctx) {
+        avcodec_free_context(&h->audio_ctx);
+    }
+    if (h->audio_pkt) {
+        av_packet_free(&h->audio_pkt);
+    }
+    if (h->audio_frame) {
+        av_frame_free(&h->audio_frame);
     }
 
     if (h->fence_event) {

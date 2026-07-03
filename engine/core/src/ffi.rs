@@ -66,19 +66,16 @@ pub extern "C" fn timeline_get_active_clips(
     let out_slice = unsafe { std::slice::from_raw_parts_mut(out_clips, max_clips as usize) };
 
     for (track_idx, track) in timeline.tracks.iter().enumerate() {
+        eprintln!("[FFI] track {} type={:?} clips={}",
+            track_idx, track.track_type, track.clips.len());
         if track.muted || track.hidden {
             continue;
         }
-        // Determine kind: 0 = Video, 1 = Audio
-        let track_kind_val = match track.track_type {
-            crate::timeline::ClipType::Audio => 1u32,
-            _ => 0u32,
-        };
-
-        let track_kind = match track.track_type {
+        // Determine kind: 0 = Video, 1 = Audio. Skip any track type we don't handle.
+        let track_kind_val: u32 = match track.track_type {
             crate::timeline::ClipType::Audio => 1,
             crate::timeline::ClipType::Video => 0,
-            _ => continue, // We only process video/audio clips this way
+            _ => continue, // Skip subtitle/unknown tracks
         };
 
         for clip in &track.clips {
@@ -164,13 +161,31 @@ pub extern "C" fn timeline_resolve_media(media_ref: *const c_char) -> *mut c_cha
         Err(_) => return ptr::null_mut(),
     };
 
-    let manifest_path = "media.json";
-    let mut resolved_path = format!("project/media/{}", media_ref_str); // default fallback
+    // Find media.json by searching parent directories upwards
+    let mut manifest_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let mut manifest_path = manifest_dir.join("media.json");
 
-    if let Ok(content) = std::fs::read_to_string(manifest_path) {
+    for _ in 0..10 {
+        if manifest_path.exists() {
+            break;
+        }
+        if let Some(parent) = manifest_dir.parent() {
+            manifest_dir = parent.to_path_buf();
+            manifest_path = manifest_dir.join("media.json");
+        } else {
+            break;
+        }
+    }
+
+    let mut resolved_path = format!("project/media/{}.mp4", media_ref_str); // default fallback with extension
+
+    if let Ok(content) = std::fs::read_to_string(&manifest_path) {
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
             if let Some(path) = json.get(media_ref_str).and_then(|v| v.as_str()) {
-                resolved_path = format!("project/media/{}", path);
+                let project_media = manifest_dir.join("project").join("media").join(path);
+                if let Some(p_str) = project_media.to_str() {
+                    resolved_path = p_str.to_string();
+                }
             }
         }
     }

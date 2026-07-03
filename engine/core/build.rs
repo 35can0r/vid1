@@ -57,19 +57,16 @@ fn main() {
     }
 
     // Tell cargo where to find the .lib files
-    println!(
-        "cargo:rustc-link-search=native={}",
-        build_dir.join("pipeline").join("Release").display()
-    );
-    println!(
-        "cargo:rustc-link-search=native={}",
-        build_dir.join("effects").join("Release").display()
-    );
-    println!(
-        "cargo:rustc-link-search=native={}",
-        build_dir.join("Release").display()
-    );
-    println!("cargo:rustc-link-search=native={}", build_dir.display());
+    let render_build = root.join("render").join("build");
+  
+    println!("cargo:rustc-link-search=native={}",
+        render_build.join("pipeline").join("Release").display());
+    println!("cargo:rustc-link-search=native={}",
+        render_build.join("effects").join("Release").display());
+    println!("cargo:rustc-link-search=native={}",
+        render_build.join("Release").display());
+    println!("cargo:rustc-link-search=native={}",
+        render_build.display());
 
     // Search path for vcpkg static libraries (FFmpeg)
     let vcpkg_lib_dir = format!("{}/installed/arm64-windows-static-md/lib", vcpkg_root);

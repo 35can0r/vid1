@@ -54,10 +54,8 @@ unsafe extern "C" {
 
     fn active_clips_free(ptr: *mut ActiveClipC, count: i32);
 
-    // Resolve media UUID -> absolute path (reads media.json). Caller must free with palmier_free_string.
     fn timeline_resolve_media(media_ref: *const c_char) -> *mut c_char;
-
-    // Free strings allocated by Rust FFI (palmier_free_string is defined in ffi.rs)
+    fn string_free(ptr: *mut c_char);
     fn palmier_free_string(ptr: *mut c_char);
 
     // C++ decoder ABI
@@ -73,45 +71,25 @@ unsafe extern "C" {
     fn decoder_close(h: *mut DecoderHandleOpaque);
 }
 
-/// Resolve a media UUID (null-terminated ASCII in the clip struct) to a file path CString.
-/// Returns None if the UUID is empty or the path can't be resolved.
-unsafe fn resolve_media_path(media_ref_bytes: &[u8; 37]) -> Option<CString> {
-    let len = media_ref_bytes.iter().position(|&b| b == 0).unwrap_or(37);
-    if len == 0 {
-        return None;
-    }
-    let c_media_ref = CString::new(&media_ref_bytes[..len]).ok()?;
-    let resolved_ptr = unsafe { timeline_resolve_media(c_media_ref.as_ptr()) };
-    if resolved_ptr.is_null() {
-        return None;
-    }
-    let path_str = unsafe { CStr::from_ptr(resolved_ptr) }.to_str().ok()?.to_owned();
-    unsafe { palmier_free_string(resolved_ptr) };
-    CString::new(path_str).ok()
-}
-
 /// Decode one audio chunk for a single clip, returning stereo f32 interleaved PCM
 /// at `target_sample_rate`. Falls back to silence on any error.
 unsafe fn decode_audio_chunk(
-    media_ref_bytes: &[u8; 37],
+    decoder: *mut DecoderHandleOpaque,
     source_frame: i64,
     chunk_frames: usize,
     target_sample_rate: u32,
 ) -> Vec<f32> {
     let silence = || vec![0.0f32; chunk_frames * 2];
 
-    let path_cstr = match unsafe { resolve_media_path(media_ref_bytes) } {
-        Some(p) => p,
-        None => return silence(),
-    };
-
-    let decoder = unsafe { decoder_open(path_cstr.as_ptr()) };
     if decoder.is_null() {
         return silence();
     }
 
     // Query native audio format so we can resample if needed
     let audio_info = unsafe { decoder_get_audio_info(decoder) };
+    if audio_info.sample_rate <= 0 || audio_info.channels <= 0 {
+        return silence();
+    }
     let native_rate = audio_info.sample_rate as u32;
 
     // Allocate a large enough buffer for the native-rate chunk plus extra
@@ -134,7 +112,6 @@ unsafe fn decode_audio_chunk(
             target_sample_rate, // informational, not used by C++ yet
         )
     };
-    unsafe { decoder_close(decoder) };
 
     if ret < 0 || out_count <= 0 || native_rate == 0 {
         return silence();
@@ -205,6 +182,9 @@ pub fn run_mixer_thread(
     fps: f64,
 ) {
     let lookahead_samples = sample_rate as usize / 5; // 200ms
+    
+    let mut decoder_cache: std::collections::HashMap<String, *mut DecoderHandleOpaque> = std::collections::HashMap::new();
+    let mut resolved_path_cache: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
     loop {
         if is_shutting_down.load(Ordering::Relaxed) {
@@ -225,9 +205,10 @@ pub fn run_mixer_thread(
         }
 
         let current_sample = sample_position.load(Ordering::Relaxed);
-        let lookahead_frame = ((current_sample + lookahead_samples as i64 / 2) as f64
-            / sample_rate as f64
-            * fps) as i64;
+        let buffered_samples = prod.occupied_len() as i64 / 2; // stereo pairs
+        let mix_sample = current_sample + buffered_samples;
+
+        let lookahead_frame = (mix_sample as f64 / sample_rate as f64 * fps) as i64;
 
         let mut clips: [ActiveClipC; 16] = unsafe { std::mem::zeroed() };
 
@@ -241,21 +222,60 @@ pub fn run_mixer_thread(
         for i in 0..count as usize {
             let clip = &clips[i];
 
-            for clip in clips_slice {
-                // FIX 1: Only process audio tracks (track_kind == 1)
-                if clip.track_kind != 1 {
-                    continue;
-                }
+            let media_ref_str = match std::str::from_utf8(&clip.media_ref) {
+                Ok(s) => s.trim_end_matches('\0').to_string(),
+                Err(_) => continue,
+            };
 
-                // FIX 2: Decode real audio via FFmpeg C ABI decoder + rubato resampling
-                let pcm = unsafe {
-                    decode_audio_chunk(
-                        &clip.media_ref,
-                        clip.source_frame,
-                        chunk_frames,
-                        sample_rate,
-                    )
+            let mut media_path = String::new();
+            if let Some(path) = resolved_path_cache.get(&media_ref_str) {
+                media_path = path.clone();
+            } else {
+                let null_terminated: Vec<u8> = clip.media_ref.iter()
+                    .copied()
+                    .take_while(|&b| b != 0)
+                    .chain(std::iter::once(0u8))
+                    .collect();
+
+                let resolved_ptr = unsafe {
+                    timeline_resolve_media(null_terminated.as_ptr() as *const c_char)
                 };
+                if !resolved_ptr.is_null() {
+                    if let Ok(path_str) = unsafe { CStr::from_ptr(resolved_ptr) }.to_str() {
+                        media_path = path_str.to_string();
+                        resolved_path_cache.insert(media_ref_str.clone(), media_path.clone());
+                    }
+                    unsafe { string_free(resolved_ptr); }
+                }
+            }
+
+            if media_path.is_empty() {
+                continue;
+            }
+
+            let mut decoder = std::ptr::null_mut();
+            if let Some(&dec) = decoder_cache.get(&media_path) {
+                decoder = dec;
+            } else {
+                if let Ok(path_cstr) = CString::new(media_path.as_str()) {
+                    decoder = unsafe { decoder_open(path_cstr.as_ptr()) };
+                    decoder_cache.insert(media_path.clone(), decoder);
+                }
+            }
+
+            if decoder.is_null() {
+                continue;
+            }
+
+            // Decode real audio via FFmpeg C ABI decoder + rubato resampling
+            let pcm = unsafe {
+                decode_audio_chunk(
+                    decoder,
+                    clip.source_frame,
+                    chunk_frames,
+                    sample_rate,
+                )
+            };
 
             for (j, s) in pcm.iter().enumerate() {
                 if j < mixed.len() {
@@ -268,6 +288,15 @@ pub fn run_mixer_thread(
             *s = s.clamp(-1.0, 1.0);
         }
 
+        let _max_abs = mixed.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
+
         prod.push_slice(&mixed);
+    }
+
+    // Cleanup cached decoders on shutdown
+    for (_, dec) in decoder_cache {
+        if !dec.is_null() {
+            unsafe { decoder_close(dec); }
+        }
     }
 }

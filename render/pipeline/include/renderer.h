@@ -37,10 +37,9 @@ typedef struct ActiveClipC ActiveClipC;
 int32_t timeline_get_active_clips(
     const void* timeline,
     int64_t frame_number,
-    ActiveClipC** out_clips
+    ActiveClipC* out_clips,
+    int32_t max_clips
 );
-
-void active_clips_free(ActiveClipC* ptr, int32_t count);
 
 char* timeline_resolve_media(const char* media_ref);
 
